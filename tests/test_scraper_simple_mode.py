@@ -25,10 +25,11 @@ def _simple(roles, depth="normal", sources=None, focus=()):
     return s
 
 
-def test_fresh_install_starts_in_simple_normal_with_google_jobs_off():
+def test_fresh_install_starts_in_simple_normal_with_google_jobs_and_dice_off():
     s = ss.load()
     assert s["mode"] == "simple" and s["depth"] == "normal"
     assert s["sources"]["google_jobs"] is False and s["sources"]["linkedin"] is True
+    assert s["sources"]["dice"] is False   # Dice redirects automated requests since Oct 2026
 
 
 def test_pre_redesign_settings_file_loads_as_custom_and_keeps_its_platforms():
@@ -54,7 +55,7 @@ def test_linkedin_searches_every_role_and_starred_roles_deeper():
 
 def test_indeed_and_google_jobs_are_limited_to_the_first_roles_starred_first():
     roles = ["A", "B", "C", "D", "E"]
-    s = _simple(roles, focus=("E",), sources={**ss._DEFAULT_SOURCES, "google_jobs": True})
+    s = _simple(roles, focus=("E",), sources={**ss._DEFAULT_SOURCES, "google_jobs": True, "dice": True})
     plan = ss.simple_plan(s)
     assert list(plan["indeed"]) == ["E", "A", "B"]      # max 3 on normal, starred first
     assert list(plan["google_jobs"]) == ["E", "A"]       # max 2 on normal -> 2 of 100 monthly searches per run
@@ -62,7 +63,8 @@ def test_indeed_and_google_jobs_are_limited_to_the_first_roles_starred_first():
 
 
 def test_depth_changes_the_numbers():
-    light, deep = ss.simple_plan(_simple(["A"], "light")), ss.simple_plan(_simple(["A"], "deep"))
+    on = {**ss._DEFAULT_SOURCES, "dice": True}
+    light, deep = ss.simple_plan(_simple(["A"], "light", sources=on)), ss.simple_plan(_simple(["A"], "deep", sources=on))
     assert light["linkedin"]["A"] < deep["linkedin"]["A"]
     assert light["dice"]["A"] < deep["dice"]["A"]
     assert ss.company_pass_results(_simple(["A"], "light")) < ss.company_pass_results(_simple(["A"], "deep"))

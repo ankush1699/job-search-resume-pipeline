@@ -27,18 +27,23 @@ def generate_profile_cache(master_data: dict) -> str:
     # `availability` is optional (removed from master data Sep 2026 — a start
     # date is meaningless once the candidate is already on the market). No
     # default: the old "July 2026" fallback silently resurrected a stale date
-    # whenever the field was absent. If present, "F-1 OPT | Available X" is
-    # reduced to "X"; if absent, the sentence is simply omitted.
+    # whenever the field was absent. If present, "<work authorization> | Available X"
+    # is reduced to "X"; if absent, the sentence is simply omitted.
     availability_raw = (p.get("availability") or "").strip()
     available_from = availability_raw.split("Available")[-1].strip() if "Available" in availability_raw else availability_raw
-    visa_line = "Visa: F-1 OPT. Authorized to work in the US immediately. Requires H-1B sponsorship for long-term employment."
+    # Work-authorization line comes from the master data (`candidate_context.visa_line`),
+    # not from code, so it stays out of the public repo. Omitted when not provided.
+    visa_line = ((master_data.get("candidate_context") or {}).get("visa_line") or "").strip()
     if available_from:
-        visa_line += f" Available {available_from}."
+        visa_line = f"{visa_line} Available {available_from}.".strip()
 
     lines = [
         "CANDIDATE PROFILE CACHE",
         "=======================",
-        visa_line,
+    ]
+    if visa_line:
+        lines.append(visa_line)
+    lines += [
         "",
         "EXPERIENCE",
         "----------",

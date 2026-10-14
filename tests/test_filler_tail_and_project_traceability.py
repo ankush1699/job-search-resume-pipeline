@@ -7,7 +7,7 @@ Two deterministic guards added Sep 2026 after real runs:
    finished bullet (", demonstrating hands-on proficiency with agentic systems
    and performance optimization."). It adds no fact and is a recognizable
    generated-resume pattern; the finalizer strips it as the last step before
-   render. Real clauses that carry a result (", reducing setup time by 35%.")
+   render. Real clauses that carry a result (", reducing setup time by 30%.")
    must be untouched.
 
 2. enforce_project_bullet_traceability(): same fidelity floor as experience
@@ -43,7 +43,7 @@ def test_strips_grounding_tail_from_summary_sentence():
 
 
 def test_result_clause_is_not_stripped():
-    t = "Designed a reusable framework covering project structure and base UI components, reducing new project setup time by 35%."
+    t = "Designed a reusable framework covering project structure and base UI components, reducing new project setup time by 30%."
     assert strip_filler_tail(t) == t
 
 
@@ -54,25 +54,25 @@ def test_mid_sentence_verb_is_not_stripped():
 
 
 _MASTER_PROJECTS = [{
-    "name": "Autonomous Job Search & Resume Pipeline",
+    "name": "Automated Job Search & Resume Pipeline",
     "bullets": [
-        {"text": "Built an end-to-end autonomous job search system combining a multi-platform scraper with a 6-node LangGraph agentic pipeline that automatically tailors resumes and cover letters."},
+        {"text": "Built an end-to-end automated job search system combining a multi-platform scraper with a 6-node LangGraph agentic pipeline that automatically tailors resumes and cover letters."},
         {"text": "Backed the pipeline with a 219-test Pytest suite covering scoring logic, cache invalidation, and scraper filters."},
     ],
 }]
 
 
 def test_faithful_project_rewrite_is_kept():
-    tailored = [{"project_name": "Autonomous Job Search & Resume Pipeline", "bullets": [
-        "Built an autonomous job search system: a multi-platform scraper feeding a 6-node LangGraph agentic pipeline that tailors resumes and cover letters automatically.",
+    tailored = [{"project_name": "Automated Job Search & Resume Pipeline", "bullets": [
+        "Built an automated job search system: a multi-platform scraper feeding a 6-node LangGraph agentic pipeline that tailors resumes and cover letters automatically.",
         "Backed it with a 219-test Pytest suite over scoring logic, cache invalidation, and scraper filters.",
     ]}]
     out, reverts = enforce_project_bullet_traceability(tailored, _MASTER_PROJECTS)
-    assert reverts == [] and out[0]["bullets"][0].startswith("Built an autonomous")
+    assert reverts == [] and out[0]["bullets"][0].startswith("Built an automated")
 
 
 def test_drifted_or_number_dropping_project_bullet_is_reverted():
-    tailored = [{"project_name": "Autonomous Job Search & Resume Pipeline", "bullets": [
+    tailored = [{"project_name": "Automated Job Search & Resume Pipeline", "bullets": [
         "Delivered an innovative AI solution leveraging cutting-edge techniques for job seekers.",     # drift
         "Backed the pipeline with a comprehensive Pytest suite covering scoring logic, cache invalidation, and scraper filters.",  # dropped 219
     ]}]
@@ -84,7 +84,7 @@ def test_drifted_or_number_dropping_project_bullet_is_reverted():
 
 def test_fuzzy_project_name_and_legacy_entries_pass_through():
     tailored = [
-        {"project_name": "Autonomous Job Search", "bullets": ["Totally unrelated marketing copy about synergy."]},  # fuzzy match -> revert
+        {"project_name": "Automated Job Search", "bullets": ["Totally unrelated marketing copy about synergy."]},  # fuzzy match -> revert
         {"project_name": "Something Else", "bullet_1": "a", "bullet_2": "b"},                                        # legacy -> untouched
     ]
     out, reverts = enforce_project_bullet_traceability(tailored, _MASTER_PROJECTS)

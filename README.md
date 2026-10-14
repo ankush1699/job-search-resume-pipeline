@@ -1,208 +1,142 @@
-# AI Resume Agent
+# Job Search Resume Pipeline
 
-> **Built for one candidate, then generalized.** The pipeline is data-driven (everything it
-> may claim comes from your own `Ankush_Master_Data.json`), but a few prompts still describe the
-> maintainer's profile (visa status, stack, seniority) — see *Using your own data* below.
-> Personal project; not affiliated with any job board or employer.
+A LangGraph pipeline that tailors a resume and cover letter to a job posting and checks every claim against your real experience. About 9 cents per application.
 
-An autonomous job-search pipeline: score a job posting for fit before spending
-any money on it, then tailor a resume and cover letter only for postings worth
-applying to. Three entry points (web UI, CLI, scraper) share one core engine.
+## Why it exists
 
-## Project structure
+Tailoring a resume for each job takes time, and AI tools tend to invent things: a metric you never hit, a tool you never used. This project does two things about that.
 
-```
-./
-├── core/                   Provider-agnostic engine internals — the parts every
-│   ├── llm.py                entry mode shares.
-│   ├── red_flags.py         llm.py:        cheap-tier model resolution (Groq → Ollama →
-│   ├── jd_cache.py                         Claude Haiku fallback) vs. quality-tier (Sonnet).
-│   ├── should_apply.py      red_flags.py:  free, deterministic visa/clearance rejection regexes.
-│   └── profile_cache.py     jd_cache.py:   permanent, content-hash-keyed cache — a posting
-│                                           is never rescored twice, from any entry mode.
-│                            should_apply.py: the 3-stage fit gate (red flags → cache → LLM
-│                                              rubric) that everything else depends on.
-│                            profile_cache.py: compact candidate-profile text for prompts.
-│
-├── engine/                 The LangGraph tailoring pipeline itself.
-│   ├── graph.py              graph.py:      the 6-node graph (should_apply → triage →
-│   ├── schemas.py                           strategist → writer → editor → finalizer)
-│   ├── state.py                             plus the Python validators that check every
-│   ├── pdf_generator.py                     generated claim against master data.
-│   ├── generate_generic.py   pdf_generator.py: Jinja2 → LaTeX → PDF, plus the single
-│   └── generate_role_family.py               sanitize_output_text() choke point (no em
-│                                               dashes, no stray review tags — applies to
-│                                               every PDF this repo produces).
-│                            generate_generic.py:    deterministic, no-LLM, no-JD resume.
-│                            generate_role_family.py: same, plus scoped overrides (summary,
-│                                                       skills, email) for a family of similar
-│                                                       postings without touching master data.
-│
-├── modes/                  The three ways to invoke the engine.
-│   ├── manual.py              manual.py:   paste company + JD, run the full graph.
-│   ├── scraper.py             scraper.py:  thin wrapper over scraper/ for one cycle or the daemon.
-│   └── autofill.py            autofill.py: Playwright form-fill, stops before submit — never
-│                                            answers visa/EEO/salary questions, never touches
-│                                            a CAPTCHA, never clicks submit.
-│
-├── scraper/                 Multi-platform job scraping + filtering (LinkedIn/Indeed via
-│   └── ...                   jobspy, Dice RSS, Google Jobs via SerpApi) → Google Sheets.
-│
-├── cover_letter/             Standalone cover-letter regeneration from an existing run
-│   └── ...                   folder — for when you want a new CL without rerunning the
-│                              whole (paid) pipeline.
-│
-├── frontend/                Static single-page web UI (no build step) — served by
-│   ├── index.html             server.py, or deployable standalone to Cloudflare Pages.
-│   ├── app.js
-│   └── style.css
-│
-├── templates/                LaTeX templates (Jinja2) for resume / cover letter / the
-│   └── *.tex                 no-JD generic resume.
-│
-├── tests/                   Automated pytest suite (deterministic logic only — no paid
-│   ├── test_*.py              LLM calls) plus two manual template-check scripts.
-│   └── manual_check_*.py
-│
-├── docs/                     Analysis notes and the free-tier deployment guide.
-│
-├── apply.py                  Unified CLI — see "Running it" below.
-├── server.py                  FastAPI backend for the web UI.
-├── run.py                     GitHub Actions entry point (env-var driven; do not remove,
-│                               .github/workflows/*.yml call this directly).
-├── Ankush_Master_Data.example.json   Fictional sample of the data format (copy it — see Setup).
-│                                      Your real Ankush_Master_Data.json is gitignored.
-├── Dockerfile / fly.toml      Free-tier deployment (Fly.io).
-└── requirements.txt
-```
+1. It decides whether a posting is worth applying to before spending money on it.
+2. It only lets the writer use facts from a file you wrote yourself. Python checks then reject any bullet that adds a number or a technology that is not in that file.
 
-**Why three top-level entry-point scripts?** They're not redundant — `apply.py`
-is the interactive CLI, `server.py` is the web backend, `run.py` is what
-GitHub Actions invokes with environment variables. Each is documented below.
+I built it for my own job search, then cleaned it up so someone else can use it with their own data. A few prompts still describe my profile (see "Using your own data").
 
-## Setup
+## How it works
+
+Every posting goes through the same checks, cheapest first:
+
+1. **Red-flag regex checks.** Free. They reject postings that say things like "no sponsorship" or "security clearance required".
+2. **Cache lookup.** Free. Each posting is hashed by its text, so the same posting is not scored twice.
+3. **Fit score.** One cheap LLM call. It scores the posting against your profile.
+4. **Tailoring.** Only for postings that pass. A 6-node LangGraph pipeline runs in this order: `should_apply`, `triage`, `strategist`, `writer`, `editor`, `finalizer`.
+5. **Claim check.** Python validators compare every generated bullet to your master data and revert anything invented or any number that was dropped.
+6. **Output.** The resume and cover letter are rendered with Jinja2 and LaTeX into PDFs.
+
+**Which models do what**
+
+- **Claude Haiku** handles scoring, keyword extraction, planning (the strategist step) and editing.
+- **Claude Sonnet** writes the final resume and cover letter text.
+- **Groq and a local Ollama model are optional alternatives.** The cheap tier uses the first provider that is available, in this order: Haiku (needs `ANTHROPIC_API_KEY`), Groq (needs `GROQ_API_KEY`), then Ollama (must be running). If the chosen provider hits a daily quota, a missing model or repeated tool-call failures during a run, the pipeline moves to the next one.
+- **`LLM_CHEAP_PROVIDER` forces one.** Set it to `anthropic`, `groq` or `ollama`.
+- `QUALITY_MODEL` changes the Sonnet model. `core/llm.py` explains why Haiku is first: Groq's free model gave inconsistent scores in testing.
+
+Three ways to run the same engine:
+
+| Entry point | What it is |
+|---|---|
+| `server.py` | Web UI (FastAPI backend, plain JavaScript frontend) |
+| `apply.py` | Command line |
+| `run.py` | Runs the pipeline from environment variables, so it can be called from GitHub Actions. This repo only ships the test workflow. |
+
+The scraper collects postings from LinkedIn and Indeed (through python-jobspy), Dice, Google Jobs (through SerpApi) and company career boards (Greenhouse, Lever, Ashby, Workday), then writes them to a Google Sheet.
+
+Folders:
+
+| Folder | Contents |
+|---|---|
+| `core/` | Model selection, cost tracking, red-flag regexes, fit scoring, posting cache |
+| `engine/` | The LangGraph pipeline, claim validators, PDF generation |
+| `modes/` | Manual run, scraper run, form autofill |
+| `scraper/` | Job scraping, filtering, Google Sheets output |
+| `cover_letter/` | Regenerate a cover letter from an earlier run |
+| `frontend/` | Web UI, no build step |
+| `templates/` | LaTeX templates |
+| `tests/` | pytest suite |
+| `docs/` | Deployment guide |
+
+## How to run it
+
+You need Python and a LaTeX install that provides `pdflatex`. The CI workflow uses Python 3.13 and the Dockerfile uses 3.12.
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-cp .env.example .env   # then fill in real values — see below
-cp Ankush_Master_Data.example.json Ankush_Master_Data.json   # then replace with YOUR data
+cp .env.example .env   # then fill in the values
+cp Ankush_Master_Data.example.json Ankush_Master_Data.json   # then replace with your own data
 ```
 
-Required in `.env`: `ANTHROPIC_API_KEY`. Everything else has a sane default or
-only matters for a specific mode (SerpApi/Sheets/Telegram for scraper mode,
-`APP_PASSWORD` for the web UI).
+`ANTHROPIC_API_KEY` is required. Everything else is optional or only needed for one mode (SerpApi, Google Sheets and Telegram for the scraper, `APP_PASSWORD` for the web UI).
 
-**To actually use the full potential of the agent — set `GROQ_API_KEY`.**
-Free at [console.groq.com](https://console.groq.com). Without it, every
-"cheap tier" call (should-apply scoring, keyword extraction, strategist,
-editor) silently falls back to paid Claude Haiku, which works but defeats the
-entire cost-optimization design. This is the single highest-leverage thing to
-configure before relying on this daily.
-
-## Using your own data
-
-`Ankush_Master_Data.example.json` is a **fictional** person ("Alex Rivera") in the exact
-format the engine reads: contact info, summary, skills, employers with bullets, projects,
-education. Copy it to `Ankush_Master_Data.json` (gitignored — it stays on your machine) and
-replace every value with your own real, verifiable experience. The tailoring pipeline only
-rearranges and rewords what is in that file; Python validators then check every generated
-bullet against it (invented metrics, technologies you never listed and dropped numbers are
-rejected or reverted), so a claim can't enter a resume unless you wrote it there first.
-
-Things written for the maintainer that you should edit for yourself:
-- `core/should_apply.py` — the `CANDIDATE CONTEXT` block in the scoring prompt (years of
-  experience, visa status, target level, stack).
-- `engine/graph.py` — the writer/editor prompts describe which technologies are "production" vs
-  "project-only" for that profile.
-- Scraper tab — your roles, location, sources, watched companies, daily cap and minimum score.
-
-### Optional: LinkedIn session cookie
-LinkedIn scraping works without it but is more limited. If you set `LINKEDIN_COOKIE` (your own
-`li_at` session), results and descriptions improve — **but automated access with a logged-in
-session is against LinkedIn's terms of service and can get your account restricted.** It is
-off unless you opt in. Indeed, Dice, Google Jobs (SerpApi) and company ATS boards
-(Greenhouse / Lever / Ashby / Workday) need no login. Never commit your cookie; `.env` is
-gitignored.
-
-## Running it — three ways
-
-### 1. Web UI (recommended day-to-day)
+**Web UI**
 
 ```bash
 ./venv/bin/uvicorn server:app --reload --port 8000
 ```
 
-Open `http://localhost:8000`, sign in with `APP_PASSWORD`. Paste a company +
-JD, click **Check fit (free)** — this runs only the should-apply gate, costs
-nothing if it's a bad fit. If it passes, **Generate tailored resume** runs the
-full pipeline and gives you download links. The **Scraper** tab asks five plain questions (which roles, where and how
-recent, which sources and how deep, which companies to watch, how many to keep), shows a
-plain-English summary of what the next run will do, and records each run as a funnel
-(found, filtered, scored, kept) so you can see where jobs drop out. The original
-per-platform table is still under Advanced.
+Open `http://localhost:8000` and unlock it with `APP_PASSWORD`. On the **Add JD** tab, enter a company, a title and the job description, then click **Add to list**. The posting is scored, and you can generate a tailored resume (and cover letter) for it from the **Applications** tab. The **Scraper** tab runs the job scraper.
 
-### 2. CLI (`apply.py`) — scriptable, same engine
+**Command line**
 
 ```bash
-./venv/bin/python apply.py score --jd-file jd.txt                     # free verdict only
+./venv/bin/python apply.py score --jd-file jd.txt        # fit verdict only
 ./venv/bin/python apply.py manual --company "Stripe" --title "SWE" --jd-file jd.txt --cover-letter
-./venv/bin/python apply.py scrape [--daemon]                          # one cycle, or the scheduler
+./venv/bin/python apply.py scrape [--daemon]             # one scrape cycle, or run on a schedule
 ./venv/bin/python apply.py autofill --url <application url> --folder <run output folder>
-./venv/bin/python apply.py cache-stats                                # how many JDs cached, pass/reject split
+./venv/bin/python apply.py cache-stats                   # cached postings, pass and reject counts
 ```
 
-### 3. Deterministic, no-JD resumes — zero cost, zero LLM
+`autofill` fills in an application form with Playwright and stops before submitting. It does not answer visa, EEO or salary questions.
 
-For cold outreach, career fairs, or a "keep this constant" resume:
+**Resume with no job description, no LLM, no cost**
 
 ```bash
 ./venv/bin/python engine/generate_generic.py
 ```
 
-For a resume tuned to a family of similar postings (e.g. "Microsoft SWE,
-Redmond") without hand-editing a PDF — see `engine/generate_role_family.py`,
-called from a small script with explicit overrides (summary, skill order,
-email). Every override is checked against real master data; it can't
-introduce a skill or fact that doesn't already exist there.
-
-## Running the test suite
+**Tests**
 
 ```bash
 ./venv/bin/pytest tests/ -v
 ```
 
-Covers the deterministic logic only (red-flag regexes, JD cache, PDF text
-sanitization, bullet-fidelity checks) — no API keys needed, no cost. `conftest.py` supplies a
-placeholder key so the suite can never make a paid call, and skips the few tests that assert
-facts about the maintainer's real data when the sample data is in use. These exist specifically because
-two of them (`test_itar_flags_only_as_a_whole_word`,
-`test_negated_clearance_requirement_is_not_a_red_flag`) are regression tests
-for real false-positive bugs found during development; they'll fail loudly if
-either regresses.
+The tests cover deterministic logic only (regex checks, the cache, PDF text cleanup, claim checks). They make no paid calls. `conftest.py` sets a placeholder API key so the suite cannot spend money.
 
-`tests/manual_check_resume_template.py` and `manual_check_cover_letter_template.py`
-are separate, non-pytest dev scripts — they render the most recent real output
-against the LaTeX templates with no API calls, for instantly checking a
-template edit without burning tokens.
+### Using your own data
 
-## Cost model, in one paragraph
+`Ankush_Master_Data.example.json` is a fictional person ("Alex Rivera") in the format the engine reads: contact info, summary, skills, employers with bullets, projects, education. Copy it to `Ankush_Master_Data.json` (which is gitignored) and replace every value with your own real experience.
 
-Every job goes through `should_apply` first: free regex red-flags, then a
-free permanent cache lookup, then (only if neither resolved it) one cheap-tier
-LLM call. A bad fit costs $0. A good fit proceeds through keyword extraction,
-bullet selection, and editing — all cheap-tier, with the editor skipped
-entirely if deterministic validators find nothing wrong. The only paid,
-quality-tier call in the whole pipeline is the final resume/cover-letter
-writer (Claude Sonnet).
+It also has a `candidate_context` section, which the code reads instead of hardcoded text:
 
-Measured on the maintainer's own runs (Aug 6 – Oct 5, 2026): about **$0.003 per posting scored**
-(Claude Haiku with Anthropic prompt caching, ~87% of the prompt served from cache), and about
-**$0.10 per tailored application** all-in — roughly $16.6 of API spend over 154 generated
-applications, an upper bound because it also includes scraping, scoring thousands of postings
-and development test runs. Median generation time was 83 seconds.
+- `scoring_context`: a list of facts for the scoring prompt, such as years of experience, work authorization and target level.
+- `visa_line`: one line for the profile summary.
+- `title_corrections` (optional): job titles the model tends to get wrong for an employer, so the checks can catch them.
 
-## Deployment
+Some things were written for my profile and you should review them:
 
-See `docs/DEPLOYMENT.md` — Fly.io (free tier, scales to zero) + optional
-Cloudflare Pages, or a $0/month serverless variant using only GitHub Actions.
+- `engine/graph.py`: prompt examples reflect the author's own background and can be edited.
+- `core/red_flags.py`: rejects "no sponsorship" and clearance postings, which suits a candidate who needs sponsorship. Edit it if that is not you.
+- The Scraper tab in the web UI: roles, location, sources, watched companies, daily cap and minimum score.
+
+### Optional: LinkedIn cookie
+
+LinkedIn scraping works without a login but returns less. If you set `LINKEDIN_COOKIE` (your own `li_at` session value), results improve. Using a logged-in session for automated access is against LinkedIn's terms and can get your account restricted. It is off unless you set it. Never commit the cookie. `.env` is gitignored.
+
+## Results
+
+Cost is measured from the token counts the API bills, by `core/usage.py`. Each tailored run writes a `usage_report.json` into its output folder, and scraper runs record their measured cost in the run history.
+
+| Step | Cost |
+|---|---|
+| Tailored application, resume only | 8.7 cents |
+| Tailored application, resume plus cover letter | 8.9 cents |
+| Scoring one posting | under 1 cent (0.46 cents measured) |
+
+The two tailoring figures are from two real runs on the same posting, so treat "about 9 cents" as an estimate. Prompt caching did not apply to tailoring in those runs. The scoring figure comes from a scrape that scored 80 postings and was billed $0.37 in total. Postings rejected by the regex checks or found in the cache cost nothing.
+
+## Tech stack
+
+Python, LangGraph, LangChain, Claude (Haiku and Sonnet), Groq and Ollama (optional), FastAPI, Playwright, python-jobspy, SerpApi, Google Sheets (gspread), Jinja2, LaTeX, pytest, Docker, Fly.io. Plain HTML, CSS and JavaScript for the web UI.
+
+Deployment notes are in `docs/DEPLOYMENT.md`.
+
+This is a personal project and is not affiliated with any job board or employer. MIT license.

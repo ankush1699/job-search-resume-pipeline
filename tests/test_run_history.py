@@ -45,6 +45,8 @@ def _cycle(settings_overrides, raw_jobs, rejected=(), stages=("llm",), scores=(9
     def fake_score(job, profile):
         job["score"] = next(score_iter)
         job["score_stage"] = next(stage_iter)
+        # a fresh model scoring costs 1 call; a failure here cost 2 (re-ask included); cache costs 0
+        job["model_calls"] = {"llm": 1, "error": 2}.get(job["score_stage"], 0)
 
     settings = {**scheduler.scraper_settings._env_defaults(), **settings_overrides}
     with patch.object(scheduler, "fetch_jobs", return_value=raw_jobs) as mock_fetch, \
@@ -74,9 +76,41 @@ def test_a_run_is_recorded_as_a_funnel():
     assert run["kind"] == "manual" and run["status"] == "completed"
     assert run["found"] == {"linkedin": 1, "dice": 1, "company_boards": 1}
     assert run["rejected"] == {"already_seen": 1, "too_senior_title": 1}
-    assert run["scored"]["total"] == 3 and run["scored"]["model_calls"] == 2 and run["scored"]["from_cache"] == 1
+    assert run["scored"]["total"] == 3 and run["scored"]["new"] == 2 and run["scored"]["from_cache"] == 1
+    assert run["scored"]["model_calls"] == 2
     assert run["passed_bar"] == 2 and run["kept"] == 1 and run["waitlisted"] == 1
-    assert run["est_cost_usd"] == round(2 * rh.COST_PER_LLM_SCORE_USD, 3)
+    assert run["est_cost_usd"] == round(2 * rh.COST_PER_MODEL_CALL_USD, 3)
+
+
+def test_failed_scoring_is_counted_priced_and_never_marked_seen():
+    """The Oct 2026 bug: a job whose scoring failed got score 0 and was marked
+    seen, so it was never retried (28 real jobs lost). Now it is counted, its
+    paid attempts are priced, and it is NOT marked seen or cached."""
+    jobs = [_job(0), _job(1)]
+    stage_iter, score_iter = iter(("llm", "error")), iter((90, 0))
+
+    def fake_score(job, profile):
+        job["score"], job["score_stage"] = next(score_iter), next(stage_iter)
+        job["model_calls"] = {"llm": 1, "error": 2}[job["score_stage"]]
+
+    settings = {**scheduler.scraper_settings._env_defaults(), "min_score": 80}
+    with patch.object(scheduler, "fetch_jobs", return_value=jobs), \
+         patch.object(scheduler, "filter_jobs", return_value=(jobs, [])), \
+         patch.object(scheduler, "open_sheet_session", return_value=None), \
+         patch.object(scheduler, "load_profile_cache", return_value="profile"), \
+         patch.object(scheduler, "score_single_job", side_effect=fake_score), \
+         patch.object(scheduler, "lookup_sponsorship", return_value="neutral"), \
+         patch.object(scheduler.scraper_settings, "load", return_value=settings), \
+         patch.object(scheduler, "mark_seen") as mock_seen, \
+         patch.object(scheduler, "save_job_to_cache") as mock_cache, \
+         patch.object(scheduler, "send_notification"), patch("time.sleep"):
+        scheduler.run_scrape_cycle(on_new_entry=lambda j: None, overrides={"run_kind": "manual"})
+    seen_links = [c.args[0] for c in mock_seen.call_args_list]
+    assert "http://x/0" in seen_links and "http://x/1" not in seen_links      # failed job stays retryable
+    assert all(c.args[0]["apply_link"] != "http://x/1" for c in mock_cache.call_args_list)
+    run = rh.last()
+    assert run["scored"]["errors"] == 1 and run["scored"]["model_calls"] == 3
+    assert run["est_cost_usd"] == round(3 * rh.COST_PER_MODEL_CALL_USD, 3)
 
 
 def test_source_switches_reach_fetch_jobs():

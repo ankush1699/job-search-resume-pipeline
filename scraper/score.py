@@ -104,6 +104,7 @@ def score_single_job(job: dict, profile: str = None) -> None:
         job["rubric_version"]        = result.get("rubric_version")
         # "llm" = a real (paid) model call; "cache" = core.jd_cache hit; "red_flag" = free regex reject
         job["score_stage"]           = result.get("stage", "llm")
+        job["model_calls"]           = int(result.get("paid_calls") or 0)   # paid calls spent on this job
         sub = job["sub_scores"]
         print(
             f"  [score] {job.get('company','?')} — {job.get('title','?')}: {job['score']}/100 "
@@ -133,6 +134,7 @@ def score_single_job(job: dict, profile: str = None) -> None:
         job["tailoring_reasoning"] = ""
         job["rubric_version"] = None
         job["score_stage"] = "error"
+        job["model_calls"] = int(getattr(e, "paid_calls", 0) or 0)   # failures cost money too
 
 
 def score_jobs(jobs: list[dict]) -> list[dict]:

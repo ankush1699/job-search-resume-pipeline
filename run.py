@@ -8,8 +8,10 @@ Required env vars:
     JOB_DESCRIPTION
 
 Optional env vars:
-    GROQ_API_KEY           free-tier cheap model (see core/llm.py); falls back to
-                           paid Claude Haiku if unset
+    GROQ_API_KEY           optional. The cheap tier (scoring, keywords, planning, editing)
+                           uses Claude Haiku first; Groq, then local Ollama, are used only
+                           if the earlier provider is unavailable (see core/llm.py).
+                           LLM_CHEAP_PROVIDER=anthropic|groq|ollama forces one.
     JOB_TITLE              (default: "Software Engineer")
     GENERATE_RESUME        (default: "true")
     GENERATE_COVER_LETTER  (default: "false")

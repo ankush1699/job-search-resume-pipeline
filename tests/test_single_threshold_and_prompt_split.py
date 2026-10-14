@@ -187,7 +187,7 @@ def test_llm_score_sends_jd_in_human_message_and_static_in_system():
 def test_base_resume_digest_has_full_bullets_and_sections(tmp_path):
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
     from engine.generate_generic import build_base_resume_digest, write_base_resume_digest
-    long_bullet = "Built a production Angular and Ionic hybrid mobile application for a UK-based financial services client, serving 10K+ users."
+    long_bullet = "Built a production Angular and Ionic hybrid mobile application for a retail client, serving 20K+ users."
     data = {
         "personal_info": {"headline": "FULL-STACK ENGINEER"},
         "summary": "Summary text.",

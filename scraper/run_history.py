@@ -25,7 +25,11 @@ from collections import Counter
 
 _FILENAME = "scrape_history.json"
 MAX_RUNS = 30
-COST_PER_LLM_SCORE_USD = 0.003
+# Measured Oct 6 2026: $0.37 of Anthropic spend over 93 Haiku scoring calls
+# (69 successful + 24 failed attempts) -> about $0.004 per call. Every paid call
+# counts, including failed attempts and corrective re-asks.
+COST_PER_MODEL_CALL_USD = 0.004
+COST_PER_LLM_SCORE_USD = COST_PER_MODEL_CALL_USD   # old name, kept for compatibility
 _ATS_PLATFORMS = {"greenhouse", "lever", "ashby", "workday"}
 
 
@@ -66,7 +70,10 @@ def new_record(**fields) -> dict:
     rec = {
         "started_at": now(), "finished_at": None, "status": "running", "error": None,
         "found": {}, "after_filters": {}, "rejected": {},
-        "scored": {"total": 0, "model_calls": 0, "from_cache": 0, "red_flag": 0, "errors": 0, "skipped_short_jd": 0},
+        # new = jobs scored by a fresh model call; model_calls = every PAID call made
+        # (retries and corrective re-asks included), which is what costs money
+        "scored": {"total": 0, "new": 0, "model_calls": 0, "from_cache": 0, "red_flag": 0, "errors": 0,
+                   "skipped_short_jd": 0},
         "passed_bar": 0, "kept": 0, "waitlisted": 0, "est_cost_usd": 0.0, "company_found": {},
     }
     rec.update(fields)
@@ -114,7 +121,17 @@ def finish(record: dict, status: str = "completed", error: str = None) -> dict:
     record["finished_at"] = now()
     record["status"] = status
     record["error"] = error
-    record["est_cost_usd"] = round(record["scored"]["model_calls"] * COST_PER_LLM_SCORE_USD, 3)
+    # Measured cost (core/usage.py: every billed call x its model's price) when the run was
+    # tracked; the per-call estimate only as a fallback.
+    from core import usage
+    tracked = usage.end_run()
+    if tracked is not None and tracked.calls:
+        record["usage"] = tracked.summary()
+        record["est_cost_usd"] = round(tracked.cost_usd, 4)
+        record["cost_source"] = "measured"
+    else:
+        record["est_cost_usd"] = round(record["scored"]["model_calls"] * COST_PER_MODEL_CALL_USD, 3)
+        record["cost_source"] = "estimated"
     try:
         append(record)
     except OSError as e:

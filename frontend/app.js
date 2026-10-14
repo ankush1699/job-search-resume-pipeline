@@ -523,7 +523,10 @@ function generatedFilesHtml(e) {
   const links = (e.files || [])
     .map((f) => `<a href="${API_BASE}/api/entries/${e.id}/download/${encodeURIComponent(f)}?token=${getToken()}" target="_blank">${f}</a>`)
     .join("");
-  return `<div class="entry-generated"><div class="run-links">${links || "No files produced."}</div></div>`;
+  const u = e.usage;
+  const cost = u && u.cost_usd != null
+    ? `<div class="mono-label" style="margin-top:6px;">Cost to generate: $${u.cost_usd.toFixed(3)} (${u.calls} model calls, measured)</div>` : "";
+  return `<div class="entry-generated"><div class="run-links">${links || "No files produced."}</div>${cost}</div>`;
 }
 
 function formatDate(iso) {
@@ -753,7 +756,7 @@ const PLATFORM_LABELS = { linkedin: "LinkedIn", indeed: "Indeed", dice: "Dice", 
 const SOURCE_INFO = [
   { key: "linkedin", label: "LinkedIn", note: "The biggest source. Searched politely; heavy use risks a temporary block." },
   { key: "indeed", label: "Indeed", note: "Kept shallow on purpose: Indeed has flagged accounts for automated traffic." },
-  { key: "dice", label: "Dice", note: "Free and unlimited, good for tech roles." },
+  { key: "dice", label: "Dice", note: "Currently returns nothing: Dice now redirects automated requests to its website. Keep this off." },
   { key: "google_jobs", label: "Google Jobs", note: "Uses your SerpApi quota: 1 of 100 free monthly searches per role, per run." },
   { key: "company_boards", label: "Company career pages", note: "Checks the companies you watch on their own job boards." },
   { key: "linkedin_company_pages", label: "LinkedIn company pages", note: "An extra LinkedIn search limited to the companies you watch there." },
@@ -969,10 +972,10 @@ async function loadPlan() {
     if (plan.google_jobs_searches_per_run) bits.push(`Google Jobs: ${plan.google_jobs_searches_per_run} of 100 monthly searches per run`);
     const lr = plan.last_run;
     if (lr) {
-      const cost = lr.est_cost_usd ? `, about $${lr.est_cost_usd.toFixed(2)}` : "";
+      const cost = lr.est_cost_usd ? `, ${lr.cost_source === "measured" ? "" : "about "}$${lr.est_cost_usd.toFixed(2)}` : "";
       bits.push(lr.status === "error"
         ? `Last run ${timeAgo(lr.finished_at)}: failed (${escapeHtml(lr.error || "error")})`
-        : `Last run ${timeAgo(lr.finished_at)}: found ${sum(lr.found)}, scored ${lr.scored.total} (${lr.scored.model_calls} new${cost}), kept ${lr.kept}`);
+        : `Last run ${timeAgo(lr.finished_at)}: found ${sum(lr.found)}, scored ${lr.scored.total} (${lr.scored.new ?? lr.scored.model_calls} new${cost}), kept ${lr.kept}`);
     }
     $("#plan-meta").innerHTML = bits.map((b) => `<span>${b}</span>`).join("");
   } catch (e) {
@@ -1171,10 +1174,10 @@ async function loadRunHistory() {
     }
     $("#run-history").innerHTML = runs.map((r) => {
       const found = sum(r.found), passedFilters = sum(r.after_filters);
-      const cost = r.est_cost_usd ? ` · about $${r.est_cost_usd.toFixed(2)}` : "";
+      const cost = r.est_cost_usd ? ` · ${r.cost_source === "measured" ? "" : "about "}$${r.est_cost_usd.toFixed(2)}` : "";
       const head = r.status === "error"
         ? `<span class="error-msg">failed: ${escapeHtml(r.error || "")}</span>`
-        : `<span class="funnel">${found} found → ${passedFilters} passed filters → ${r.scored.total} scored (${r.scored.model_calls} new${cost}) → ${r.passed_bar} passed your bar → <strong>${r.kept} kept</strong>${r.waitlisted ? ` + ${r.waitlisted} waitlisted` : ""}</span>`;
+        : `<span class="funnel">${found} found → ${passedFilters} passed filters → ${r.scored.total} scored (${r.scored.new ?? r.scored.model_calls} new${cost}) → ${r.passed_bar} passed your bar → <strong>${r.kept} kept</strong>${r.waitlisted ? ` + ${r.waitlisted} waitlisted` : ""}${r.scored.errors ? ` · ${r.scored.errors} couldn't be scored (retried next run)` : ""}</span>`;
       const sources = Object.keys({ ...r.found, ...r.after_filters }).map((k) =>
         `<tr><td>${escapeHtml(SOURCE_NAMES[k] || k)}</td><td>${r.found[k] || 0}</td><td>${(r.after_filters || {})[k] || 0}</td></tr>`).join("");
       const rejected = Object.entries(r.rejected || {}).filter(([, n]) => n).map(([k, n]) =>
