@@ -306,7 +306,7 @@
     "Recognized with the 2023 Engineering Excellence award for shipping the tracking dashboard."
   ],
   "candidate_context": {
-    "_readme": "Used by the scoring prompt (scoring_context), the profile summary (visa_line) and the title checks (title_corrections: wrong titles the model tends to write for an employer). Replace with your own facts. All values here are fictional.",
+    "_readme": "Used by the scoring prompt (scoring_context), the profile summary (visa_line), the summary brief (summary_lead: what the first sentence leads with for non-AI roles; metric_examples: example numbers quoted to the writer) and the title checks (title_corrections: wrong titles the model tends to write for an employer). Replace with your own facts. All values here are fictional.",
     "visa_line": "Visa: authorized to work in the US now. Will need employer sponsorship for long-term employment.",
     "scoring_context": [
       "3+ years of production experience (React and Java services for a logistics platform)",
@@ -330,6 +330,8 @@
           "Software Developer"
         ]
       }
-    ]
+    ],
+    "summary_lead": "shipping the React and Java services for a logistics platform (20K+ users)",
+    "metric_examples": "20K+ users, 30+ endpoints"
   }
 }
