@@ -92,7 +92,9 @@ MODES = ("simple", "custom")
 DEPTHS = ("light", "normal", "deep")
 SOURCES = ("linkedin", "indeed", "dice", "google_jobs", "company_boards", "linkedin_company_pages")
 _JOBSPY_STYLE = ("linkedin", "indeed", "dice", "google_jobs")
-_DEFAULT_SOURCES = {"linkedin": True, "indeed": True, "dice": True, "google_jobs": False,
+# Dice off by default since Oct 2026: its RSS feed now redirects automated requests
+# to the website, so every Dice search returns 0 results (not worked around).
+_DEFAULT_SOURCES = {"linkedin": True, "indeed": True, "dice": False, "google_jobs": False,
                     "company_boards": True, "linkedin_company_pages": True}
 
 # Results per role per run. Limits encode the real constraints so the user never

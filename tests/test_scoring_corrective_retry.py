@@ -132,3 +132,108 @@ def test_build_messages_correction_turn_keeps_cached_prefix_intact():
     assert corrected[2].content == _CORRECTION_TEMPLATE.format(
         problem="seniority_level='mid' allows scores [25, 20] per the rubric, but got 5")
     assert "describe the JOB, not the candidate's fit" in corrected[2].content
+
+
+
+# ── Malformed tool calls (Oct 2026) ─────────────────────────────────────────
+
+def _validation_error(missing_field="reasoning"):
+    from pydantic import BaseModel, ValidationError
+
+    class M(BaseModel):
+        reasoning: str
+
+    try:
+        M()
+    except ValidationError as e:
+        return e
+
+
+def test_malformed_answer_gets_one_reask_naming_the_field_then_succeeds():
+    """A real run burned 3 identical calls per job on these (temperature 0
+    reproduces the same mistake). Now: one re-ask that names the field."""
+    from core.should_apply import ScoringFailed  # noqa: F401  (import check)
+    haiku = MagicMock()
+    invoke = haiku.with_structured_output.return_value.invoke
+    invoke.side_effect = [_validation_error(), _LIVE_CORRECTED]
+    with patch("core.should_apply.cheap_provider", return_value="anthropic"), \
+         patch("core.should_apply.next_cheap_provider") as mock_next, \
+         patch("core.should_apply.get_chat_model", return_value=haiku), \
+         patch("core.should_apply.time.sleep") as mock_sleep:
+        result = _llm_score("some JD text")
+    assert result["score"] == 42 + 20 + 15 + 7
+    assert result["paid_calls"] == 2
+    assert invoke.call_count == 2
+    mock_next.assert_not_called()
+    mock_sleep.assert_not_called()
+    reask = invoke.call_args_list[1].args[0][2].content
+    assert "'reasoning' field was missing" in reask and "separate field" in reask
+
+
+def test_repeated_malformed_answers_stop_after_two_paid_calls_and_report_them():
+    from core.should_apply import ScoringFailed
+    haiku = MagicMock()
+    haiku.with_structured_output.return_value.invoke.side_effect = [_validation_error(), _validation_error()]
+    with patch("core.should_apply.cheap_provider", return_value="anthropic"), \
+         patch("core.should_apply.next_cheap_provider", return_value=None), \
+         patch("core.should_apply.get_chat_model", return_value=haiku), \
+         patch("core.should_apply.time.sleep"):
+        try:
+            _llm_score("some JD text", max_retries=3)
+            assert False, "expected ScoringFailed"
+        except ScoringFailed as e:
+            assert e.paid_calls == 2
+            assert "malformed answers" in str(e)
+    assert haiku.with_structured_output.return_value.invoke.call_count == 2   # was 3 identical calls
+
+
+def test_paid_calls_count_only_anthropic():
+    haiku, groq = MagicMock(), MagicMock()
+    haiku.with_structured_output.return_value.invoke.side_effect = [_validation_error(), _validation_error()]
+    groq.with_structured_output.return_value.invoke.return_value = _LIVE_CORRECTED
+    with patch("core.should_apply.cheap_provider", return_value="anthropic"), \
+         patch("core.should_apply.next_cheap_provider", side_effect=lambda p: {"anthropic": "groq"}.get(p)), \
+         patch("core.should_apply.get_chat_model", side_effect=[haiku, groq]), \
+         patch("core.should_apply.time.sleep"):
+        result = _llm_score("some JD text")
+    assert result["paid_calls"] == 2       # Groq is free tier
+
+
+# ── Agent tone/consistency fixes (Oct 6 2026) ───────────────────────────────
+
+def test_years_label_never_rounds_up_into_a_plus_claim():
+    import os, sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine")))
+    from graph import compute_years_label
+    assert compute_years_label("Nov 2020 - Jul 2024") == "nearly 4"   # 3y8m: the candidate's real TCS tenure
+    assert compute_years_label("Jan 2020 - Mar 2024") == "4+"         # 4y2m
+    assert compute_years_label("Jan 2021 - Apr 2024") == "3+"         # 3y3m
+
+
+def test_dynamic_programming_is_not_a_banned_phrase_but_tells_are():
+    import os, sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine")))
+    from graph import banned_phrase_hits
+    assert banned_phrase_hits("Stress-tested graph traversal and dynamic programming problems") == []
+    assert banned_phrase_hits("A dynamic, fast-paced team") == ["dynamic"]
+    assert set(banned_phrase_hits("seamless, comprehensive end-to-end access")) == {"seamless", "comprehensive", "end-to-end"}
+
+
+def test_too_many_ing_endings_get_flagged_but_a_couple_are_fine():
+    import os, sys
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine")))
+    from graph import validate_writer_output
+    master = {"experience": [{"company": "Acme", "bullets": [{"text": "x"}]}], "projects": []}
+    tail = "Built the API layer for the billing service, reducing manual work for the team."
+    plain = "Built the API layer for the billing service."
+    many = {"tailored_bullets": [{"company_name": "Acme", "rewritten_text": tail}] * 6 +
+                                [{"company_name": "Acme", "rewritten_text": plain}] * 2,
+            "tailored_summary": "Engineer with 20K+ users served."}
+    flagged = [f for f in validate_writer_output(many, master)["flagged_bullets"]
+               if any("participial" in i for i in f["issues"])]
+    assert flagged, "6 of 8 bullets ending in '-ing' clauses must be flagged"
+    few = {"tailored_bullets": [{"company_name": "Acme", "rewritten_text": tail}] * 2 +
+                               [{"company_name": "Acme", "rewritten_text": plain}] * 6,
+           "tailored_summary": "Engineer with 20K+ users served."}
+    assert not [f for f in validate_writer_output(few, master)["flagged_bullets"]
+                if any("participial" in i for i in f["issues"])]

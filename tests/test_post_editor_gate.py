@@ -31,7 +31,7 @@ def _report(exp_flags=0, proj_flags=0, summary_issues=0):
 
 
 _DRAFT = {
-    "tailored_summary": "Draft summary serving 10K+ users.",
+    "tailored_summary": "Draft summary serving 20K+ users.",
     "tailored_bullets": [{"company_name": "TCS", "rewritten_text": "Draft bullet."}],
     "tailored_project_bullets": [{"project_name": "P", "bullets": ["draft p1", "draft p2"]}],
 }
@@ -74,13 +74,13 @@ def test_project_and_summary_fall_back_independently():
 
 
 def test_first_person_summary_is_flagged():
-    master = {"experience": [{"company": "TCS", "bullets": [{"text": "Served 10K+ users."}]}],
+    master = {"experience": [{"company": "TCS", "bullets": [{"text": "Served 20K+ users."}]}],
               "projects": [], "personal_info": {}}
     report = validate_writer_output(
-        {"tailored_summary": "Engineer with 4+ years. I led delivery for 10K+ users.", "tailored_bullets": []}, master
+        {"tailored_summary": "Engineer with 4+ years. I led delivery for 20K+ users.", "tailored_bullets": []}, master
     )
     assert any("first person" in i for i in report["summary_issues"])
     report = validate_writer_output(
-        {"tailored_summary": "Engineer with 4+ years. Led delivery for 10K+ users.", "tailored_bullets": []}, master
+        {"tailored_summary": "Engineer with 4+ years. Led delivery for 20K+ users.", "tailored_bullets": []}, master
     )
     assert not any("first person" in i for i in report["summary_issues"])

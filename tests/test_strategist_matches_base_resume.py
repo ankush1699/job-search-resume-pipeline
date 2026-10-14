@@ -115,7 +115,7 @@ def test_llm_returning_zero_projects_still_yields_all_four():
 
 def test_include_in_generic_false_employer_is_excluded_entirely():
     """
-    Real bug, found on a live run (Sep 2026): the Virginia Tech Grader role
+    Real bug, found on a live run (Sep 2026): a short part-time grader role
     (include_in_generic: false — excluded from the base resume as a thin,
     low-signal role) surfaced on a tailored resume anyway, because
     strategist_node never checked this flag, only generate_generic.py did.

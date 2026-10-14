@@ -2,7 +2,7 @@
 tests/test_email_overrides.py
 
 Covers core/email_overrides.py — the persisted company-name -> email swap
-("every Microsoft resume should use ankushchaudhary.microsoft@gmail.com
+("every Microsoft resume should use name@example.com
 instead of the default") — and server.py's CRUD endpoints over it.
 
 Run: pytest tests/test_email_overrides.py -v
@@ -36,10 +36,10 @@ def test_save_then_load_roundtrips():
 
 def test_case_insensitive_substring_match():
     with _isolated_output_dir():
-        email_overrides.save([{"pattern": "microsoft", "email": "ankushchaudhary.microsoft@gmail.com"}])
-        assert email_overrides.get_email_override("Microsoft") == "ankushchaudhary.microsoft@gmail.com"
-        assert email_overrides.get_email_override("Microsoft Corporation") == "ankushchaudhary.microsoft@gmail.com"
-        assert email_overrides.get_email_override("MICROSOFT - Redmond") == "ankushchaudhary.microsoft@gmail.com"
+        email_overrides.save([{"pattern": "microsoft", "email": "name@example.com"}])
+        assert email_overrides.get_email_override("Microsoft") == "name@example.com"
+        assert email_overrides.get_email_override("Microsoft Corporation") == "name@example.com"
+        assert email_overrides.get_email_override("MICROSOFT - Redmond") == "name@example.com"
 
 
 def test_no_match_returns_none():

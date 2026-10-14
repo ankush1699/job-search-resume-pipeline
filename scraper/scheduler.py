@@ -174,6 +174,8 @@ def run_scrape_cycle(on_progress=None, on_new_entry=None, overrides=None):
         roles=[r.strip() for r in (overrides.get("keywords") or "").split(",") if r.strip()]
               or scraper_settings.roles(settings),
     )
+    from core import usage
+    usage.start_run("scrape")   # run_history.finish() ends it and records the measured cost
 
     print("\n" + "=" * 60)
     print("SCRAPE CYCLE STARTING")
@@ -292,15 +294,22 @@ def run_scrape_cycle(on_progress=None, on_new_entry=None, overrides=None):
             run["scored"]["errors"] += 1
             continue
         run["scored"]["total"] += 1
+        run["scored"]["model_calls"] += int(job.get("model_calls") or 0)
         stage = job.get("score_stage")
         if stage == "llm":
-            run["scored"]["model_calls"] += 1
+            run["scored"]["new"] = run["scored"].get("new", 0) + 1
         elif stage in ("url_cache", "cache"):
             run["scored"]["from_cache"] += 1
         elif stage == "red_flag":
             run["scored"]["red_flag"] += 1
         elif stage == "error":
             run["scored"]["errors"] += 1
+            # Do NOT cache or mark seen: a job whose scoring failed must be
+            # retried on the next run. Before Oct 2026 these got score 0 and
+            # were marked seen, so 28 jobs (Stripe, DoorDash, 4x JPMorganChase
+            # SWE III...) silently vanished for good.
+            print(f"  [scheduler] scoring failed — NOT marking seen, will retry next run")
+            continue
 
         # --- Cache + mark seen for EVERY scored job, pass or fail — the
         #     LLM cost is already spent, and a job that misses the cap
