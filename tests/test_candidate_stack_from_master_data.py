@@ -16,7 +16,6 @@ Run: pytest tests/test_candidate_stack_from_master_data.py -v
 """
 import json
 import os
-import pytest
 import sys
 from unittest.mock import patch
 
@@ -64,16 +63,17 @@ def test_falls_back_when_master_data_malformed(tmp_path):
         assert _load_candidate_stack() == _CANDIDATE_STACK_FALLBACK
 
 
-@pytest.mark.personal_data
-def test_real_master_data_has_skills_the_old_hardcoded_block_was_missing():
+def test_stack_lists_every_skill_in_the_example_master_data():
     """
-    Confirms the actual drift that motivated this fix: the real master data
-    (used unpatched here — this is the live file) has skills the old
-    hand-typed CANDIDATE STACK never had.
+    The stack comes from the master data's technical_skills, not a typed block.
+    Checked against the example master data so the test does not depend on anyone's real skills.
     """
-    stack = _load_candidate_stack()
-    # "RAG" used to be in this list; removed from master data Oct 2026 because no
-    # project or role backs it (see docs/RESUME_OVERHAUL_2026-10.md). The point of
-    # this test is unchanged: the stack comes from master data, not a typed block.
-    for previously_missing_skill in ["Hugging Face", "Jira", "Prompt Engineering"]:
-        assert previously_missing_skill in stack
+    example = os.path.join(os.path.dirname(__file__), "..", "Ankush_Master_Data.example.json")
+    with open(example) as f:
+        skills = json.load(f)["technical_skills"]
+    with patch("core.should_apply.MASTER_DATA_PATH", example):
+        stack = _load_candidate_stack()
+    expected = [skill for items in skills.values() for skill in items]
+    assert expected
+    for skill in expected:
+        assert skill in stack
