@@ -83,6 +83,12 @@ def cheap_provider() -> str:
     )
 
 
+def _usage_tracker():
+    """The shared callback that records every call's billed tokens (see core/usage.py)."""
+    from core.usage import TRACKER
+    return TRACKER
+
+
 def get_chat_model(tier: str, *, temperature: float = 0.0, max_tokens: int = 2048,
                     provider_override: str = None):
     """
@@ -97,7 +103,8 @@ def get_chat_model(tier: str, *, temperature: float = 0.0, max_tokens: int = 204
     """
     if tier == "quality":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=_QUALITY_MODEL, temperature=temperature, max_tokens=max_tokens)
+        return ChatAnthropic(model=_QUALITY_MODEL, temperature=temperature, max_tokens=max_tokens,
+                             callbacks=[_usage_tracker()])
 
     if tier != "cheap":
         raise ValueError(f"Unknown LLM tier: {tier!r} (expected 'cheap' or 'quality')")
@@ -105,14 +112,17 @@ def get_chat_model(tier: str, *, temperature: float = 0.0, max_tokens: int = 204
     provider = provider_override or cheap_provider()
     if provider == "groq":
         from langchain_groq import ChatGroq
-        return ChatGroq(model=_GROQ_MODEL, temperature=temperature, max_tokens=max_tokens)
+        return ChatGroq(model=_GROQ_MODEL, temperature=temperature, max_tokens=max_tokens,
+                        callbacks=[_usage_tracker()])
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         # num_predict is Ollama's max_tokens equivalent
-        return ChatOllama(model=_OLLAMA_MODEL, temperature=temperature, num_predict=max_tokens)
+        return ChatOllama(model=_OLLAMA_MODEL, temperature=temperature, num_predict=max_tokens,
+                          callbacks=[_usage_tracker()])
 
     from langchain_anthropic import ChatAnthropic
-    return ChatAnthropic(model=_HAIKU_MODEL, temperature=temperature, max_tokens=max_tokens)
+    return ChatAnthropic(model=_HAIKU_MODEL, temperature=temperature, max_tokens=max_tokens,
+                         callbacks=[_usage_tracker()])
 
 
 def is_quota_exhausted(exc: Exception) -> bool:

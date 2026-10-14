@@ -54,8 +54,27 @@ def run(company: str, title: str, jd: str,
     """Run the full engine for one pasted JD. Returns the final graph state."""
     from graph import app  # deferred: heavy import, needs API keys
 
+    from core import usage
+
     state = build_initial_state(company, title, jd, generate_resume, generate_cover_letter)
-    result = app.invoke(state)
+    with usage.track_run(f"tailor: {company} / {title}") as tracked:
+        result = app.invoke(state)
+
+    # Measured cost of this run: every call's billed tokens x the model's price.
+    report = tracked.summary()
+    result["usage"] = report
+    folder = result.get("output_folder") or ""
+    if folder and os.path.isdir(folder):
+        with open(os.path.join(folder, "usage_report.json"), "w") as f:
+            json.dump(report, f, indent=2)
+        summary_path = os.path.join(folder, "run_summary.txt")
+        if os.path.exists(summary_path):
+            with open(summary_path, "a") as f:
+                f.write(f"\nCOST OF THIS RUN (measured)\n---------------------------\n"
+                        f"${report['cost_usd']:.4f} over {report['calls']} model calls "
+                        f"({report['input_tokens']:,} input, {report['cache_read_tokens']:,} cached-read, "
+                        f"{report['output_tokens']:,} output tokens). Details: usage_report.json\n")
+    print(f"\n  [usage] {report['calls']} model calls, ${report['cost_usd']:.4f} measured")
 
     if not result.get("proceed"):
         verdict = result.get("should_apply") or {}

@@ -58,11 +58,11 @@ let `server.py` serve `frontend/` directly (already wired via `StaticFiles` moun
 
 ### Custom domain
 
-1. Buy the domain at Cloudflare Registrar (at-cost, ~$10/yr, e.g. `ankushc.dev`).
+1. Buy the domain at Cloudflare Registrar (at-cost, ~$10/yr, e.g. `example.com`).
 2. `portfolio` → apex/`www` on Cloudflare Pages (or keep GitHub Pages: add a
-   CNAME record `www → ankush1699.github.io`, set custom domain in repo settings).
-3. `agent.ankushc.dev` → CNAME to the Pages front end.
-4. `api.ankushc.dev` → `fly certs add api.ankushc.dev` + CNAME to your Fly app.
+   CNAME record `www → <your-username>.github.io`, set custom domain in repo settings).
+3. `agent.example.com` → CNAME to the Pages front end.
+4. `api.example.com` → `fly certs add api.example.com` + CNAME to your Fly app.
    TLS is automatic on both.
 
 ### Cheapest possible variant ($0/mo, no servers)

@@ -26,7 +26,7 @@ def test_metric_needed_tag_stripped():
 
 
 def test_mid_sentence_pipe_removed():
-    result = sanitize_output_text("F-1 OPT Eligible | Available July 2026")
+    result = sanitize_output_text("Needs work authorization | Available July 2026")
     assert " | " not in result
 
 
