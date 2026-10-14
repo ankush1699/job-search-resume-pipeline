@@ -83,6 +83,30 @@ def title_corrections(master_data: dict) -> list:
     return [c for c in items if isinstance(c, dict) and c.get("company")]
 
 
+_METRIC_EXAMPLES_FALLBACK = "a user count or an API count"
+_SUMMARY_LEAD_FALLBACK = "the candidate's strongest production work, taken from the selected bullets"
+
+
+def metric_examples(master_data: dict) -> str:
+    """
+    Example numbers quoted in the summary brief ("e.g. ..."), from
+    candidate_context.metric_examples in the master data (optional free text such as
+    "10K+ users, 30+ APIs"). Keeps the author's own figures out of the code.
+    """
+    text = ((master_data.get("candidate_context") or {}).get("metric_examples") or "").strip()
+    return text or _METRIC_EXAMPLES_FALLBACK
+
+
+def summary_lead(master_data: dict) -> str:
+    """
+    What the summary's first sentence should lead with (for non-AI roles), from
+    candidate_context.summary_lead in the master data (optional free text). Without
+    it the brief says to lead with the strongest production work from the selected bullets.
+    """
+    text = ((master_data.get("candidate_context") or {}).get("summary_lead") or "").strip().rstrip(".")
+    return text or _SUMMARY_LEAD_FALLBACK
+
+
 def compute_years_label(duration_str: str) -> str:
     """
     Converts 'Nov 2020 - Jul 2024' (3 years 8 months) into 'nearly 4' for use in
@@ -1538,7 +1562,7 @@ def writer_node(state: ResumeGraphState):
     - States total production experience as "{primary_exp['approx_years']} years" — never
       inflate it, and never pin all of it to one employer.
     - Contains one to three REAL numbers, every one of them drawn from the SELECTED experience
-      bullets for {primary_exp['company']} (e.g. 20K+ users, 30+ APIs). A summary with no real number
+      bullets for {primary_exp['company']} (e.g. {metric_examples(master_data)}). A summary with no real number
       is a failure; a summary with a number that isn't in those bullets is a worse one.
     - Names the degree and school naturally — "an M.S. in Computer Science at Example University",
       not the raw strings pasted together. Degree: {primary_edu['degree']}. School:
@@ -1546,7 +1570,7 @@ def writer_node(state: ResumeGraphState):
       The degree is {edu_status}: when it is Completed, write "M.S. in ..." or "completed an
       M.S. in ...", never "pursuing" or "completing".
     - Unless the JD is AI/LLM-focused, the first sentence leads with the production work:
-      shipping the Angular/Ionic and Spring Boot app for a retail client (20K+ users).
+      {summary_lead(master_data)}.
     - Wherever the LangGraph job-application agent is mentioned, call it a personal project.
       Never describe the Handshake fellowship as "paid".
     - If the JD is AI/LLM-focused, the FIRST sentence says what the candidate has actually
