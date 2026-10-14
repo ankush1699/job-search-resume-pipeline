@@ -124,3 +124,37 @@ def test_no_title_checks_when_not_configured():
 def test_code_no_longer_hardcodes_an_employer_name():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     assert "Tata Consultancy Services" not in open(os.path.join(root, "engine", "graph.py"), encoding="utf-8").read()
+
+
+# ── summary brief: lead sentence and example numbers come from master data ──────────────
+
+from engine.graph import (  # noqa: E402
+    metric_examples, summary_lead, _METRIC_EXAMPLES_FALLBACK, _SUMMARY_LEAD_FALLBACK,
+)
+
+
+def test_summary_lead_and_metric_examples_read_from_candidate_context():
+    md = {"candidate_context": {"summary_lead": "shipping the billing app (5K+ users).",
+                                "metric_examples": "5K+ users, 12 APIs"}}
+    assert summary_lead(md) == "shipping the billing app (5K+ users)"      # trailing period stripped: the prompt adds its own
+    assert metric_examples(md) == "5K+ users, 12 APIs"
+
+
+def test_summary_lead_and_metric_examples_fall_back_when_missing_or_blank():
+    for md in ({}, {"candidate_context": {}}, {"candidate_context": {"summary_lead": "  ", "metric_examples": ""}}):
+        assert summary_lead(md) == _SUMMARY_LEAD_FALLBACK
+        assert metric_examples(md) == _METRIC_EXAMPLES_FALLBACK
+
+
+def test_example_master_data_defines_both_keys():
+    example = os.path.join(os.path.dirname(__file__), "..", "Ankush_Master_Data.example.json")
+    with open(example) as f:
+        cc = json.load(f)["candidate_context"]
+    assert cc["summary_lead"].strip() and cc["metric_examples"].strip()
+
+
+def test_graph_source_has_no_hardcoded_author_story_in_the_summary_brief():
+    """The brief must not carry anyone's own employer or numbers; they live in master data."""
+    src = open(os.path.join(os.path.dirname(__file__), "..", "engine", "graph.py"), encoding="utf-8").read()
+    for hardcoded in ("retail client", "UK life-insurance client", "e.g. 20K+ users", "e.g. 10K+ users"):
+        assert hardcoded not in src, hardcoded
