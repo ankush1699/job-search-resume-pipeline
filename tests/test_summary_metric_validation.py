@@ -4,7 +4,7 @@ tests/test_summary_metric_validation.py
 Regression test for a real bug: the writer was observed producing a summary
 with no achievement metric at all (a generated Astronomer resume's summary
 said "delivered full-stack features and backend APIs serving production
-workloads" with zero number, even though real metrics like 10K+ users / 40%
+workloads" with zero number, even though real metrics like 20K+ users / 25%
 existed and were sitting in that same resume's experience bullets). Fixed by
 a deterministic check in validate_writer_output() that also blocks the
 "skip the editor" shortcut so the editor gets a chance to fix it.
@@ -30,13 +30,13 @@ _MASTER_DATA = {
         {
             "company": "Tata Consultancy Services",
             "bullets": [
-                {"text": "Served 10K+ active users.", "tags": []},
-                {"text": "Cut deployment time by 40%.", "tags": []},
+                {"text": "Served 20K+ active users.", "tags": []},
+                {"text": "Cut deployment time by 25%.", "tags": []},
             ],
         }
     ],
     "projects": [],
-    "personal_info": {"availability": "F-1 OPT, available July 2026"},
+    "personal_info": {"availability": "Needs work authorization, available July 2026"},
 }
 
 _FLAG = "no real, verifiable number"
@@ -52,7 +52,7 @@ def test_summary_with_no_metric_is_flagged():
         "tailored_summary": (
             "Full-stack engineer with 4+ years of experience. At Tata Consultancy Services, "
             "delivered full-stack features and backend APIs serving production workloads. "
-            "Available on F-1 OPT."
+            "Needs work authorization."
         ),
         "tailored_bullets": [],
     }
@@ -67,7 +67,7 @@ def test_summary_with_a_real_metric_is_not_flagged():
     draft = {
         "tailored_summary": (
             "Full-stack engineer with 4+ years of experience. At Tata Consultancy Services, "
-            "served 10K+ active users on a production platform."
+            "served 20K+ active users on a production platform."
         ),
         "tailored_bullets": [],
     }
@@ -82,7 +82,7 @@ def test_real_metric_anywhere_in_summary_satisfies_the_check():
     """
     draft = {
         "tailored_summary": (
-            "Engineer who shipped a regulated fintech platform to 10K+ users over 4+ years, "
+            "Engineer who shipped a production platform to 20K+ users over 4+ years, "
             "and spent the past year building agentic LLM systems."
         ),
         "tailored_bullets": [],

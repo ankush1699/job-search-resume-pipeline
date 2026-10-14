@@ -304,5 +304,32 @@
   },
   "achievements": [
     "Recognized with the 2023 Engineering Excellence award for shipping the tracking dashboard."
-  ]
+  ],
+  "candidate_context": {
+    "_readme": "Used by the scoring prompt (scoring_context), the profile summary (visa_line) and the title checks (title_corrections: wrong titles the model tends to write for an employer). Replace with your own facts. All values here are fictional.",
+    "visa_line": "Visa: authorized to work in the US now. Will need employer sponsorship for long-term employment.",
+    "scoring_context": [
+      "3+ years of production experience (React and Java services for a logistics platform)",
+      "B.S. in Computer Science from Example State University",
+      "Authorized to work in the US now, will need employer sponsorship for long-term employment",
+      "Target: mid-level full-stack SWE roles in the US",
+      "Strong in full-stack (React + Java), growing in AI tooling"
+    ],
+    "title_corrections": [
+      {
+        "company": "Northwind Logistics",
+        "short_name": "Northwind",
+        "wrong_titles_summary": [
+          "Software Developer",
+          "Programmer"
+        ],
+        "wrong_titles_bullets": [
+          "Software Developer"
+        ],
+        "auto_replace": [
+          "Software Developer"
+        ]
+      }
+    ]
+  }
 }

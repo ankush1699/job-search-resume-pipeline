@@ -72,10 +72,27 @@ def education_status_label(edu: dict) -> str:
         return "Completed"
 
 
+def title_corrections(master_data: dict) -> list:
+    """
+    Per-employer "wrong title" lists from candidate_context.title_corrections in the
+    master data (optional). Each item: {"company", "short_name", "wrong_titles_summary",
+    "wrong_titles_bullets", "auto_replace"}. Replaces what used to be a hardcoded
+    check for one specific employer. With no entries, no title-specific checks run.
+    """
+    items = (master_data.get("candidate_context") or {}).get("title_corrections") or []
+    return [c for c in items if isinstance(c, dict) and c.get("company")]
+
+
 def compute_years_label(duration_str: str) -> str:
     """
-    Converts 'Nov 2020 - Jul 2024' into '4+' for use in resume summaries.
-    Rounds up at 0.5 years so 3y8m → '4+', not '3+'.
+    Converts 'Nov 2020 - Jul 2024' (3 years 8 months) into 'nearly 4' for use in
+    resume summaries ("nearly 4 years of production experience").
+
+    Never rounds UP into a "+" claim (Oct 2026: it used to turn 3y8m into '4+',
+    an overstatement a recruiter checks against the dates in seconds, and it
+    contradicted the base resume and LinkedIn):
+      fraction >= 0.5 -> 'nearly N+1'   (3y8m -> 'nearly 4')
+      fraction <  0.5 -> 'N+'           (3y4m -> '3+', 4y2m -> '4+')
     """
     try:
         parts = duration_str.split(" - ")
@@ -85,8 +102,10 @@ def compute_years_label(duration_str: str) -> str:
         end_str = parts[1].strip()
         end = datetime.datetime.now() if end_str.lower() in ("present", "current") else datetime.datetime.strptime(end_str, "%b %Y")
         years = (end - start).days / 365.25
-        rounded = math.floor(years) + (1 if (years % 1) >= 0.5 else 0)
-        return f"{rounded}+"
+        whole = math.floor(years)
+        if (years % 1) >= 0.5:
+            return f"nearly {whole + 1}"
+        return f"{whole}+"
     except Exception:
         return ""
 
@@ -207,7 +226,37 @@ BANNED_PHRASES = [
     "spearheaded", "leveraged", "synergized", "passionate about", "results-driven",
     "detail-oriented", "thought leader", "dynamic", "robust", "cutting-edge",
     "game-changing", "best-in-class", "world-class",
+    # Added Oct 2026 (senior-reviewer feedback): the most recognizable resume tells.
+    "seamless", "comprehensive", "end-to-end", "end to end",
 ]
+
+
+def banned_phrase_hits(text: str) -> list:
+    """Banned phrases present in `text`. 'dynamic' is the one false-positive
+    risk: "dynamic programming" is a real algorithms topic in the candidate's
+    own Handshake bullets, not the buzzword, and flagging it used to trigger a
+    pointless editor pass on every run."""
+    lower = re.sub(r"dynamic programming", "", (text or "").lower())
+    return [p for p in BANNED_PHRASES if p in lower]
+
+
+# Bullets that end in a participial clause (", reducing X", ", ensuring Y") are
+# the single most recognizable generated-resume cadence. A few are natural; a
+# resume where most bullets end that way reads machine-written. "including /
+# using / during / ..." open a list or a scope, not a flourish, so they don't count.
+_PARTICIPLE_TAIL_RE = re.compile(
+    r",\s+(?:and\s+)?(?!including\b|using\b|during\b|following\b|according\b|regarding\b)[a-z]+ing\b[^;:]*$",
+    re.IGNORECASE,
+)
+
+
+def ends_in_participle_clause(text: str) -> bool:
+    return bool(_PARTICIPLE_TAIL_RE.search((text or "").strip().rstrip(".")))
+
+
+def participle_allowance(total_bullets: int) -> int:
+    """How many experience bullets in one resume may end in a participial clause."""
+    return max(2, math.ceil(total_bullets * 0.25))
 WEAK_VERBS = [
     "helped", "assisted", "worked on", "was responsible for",
     "participated in", "supported", "contributed to",
@@ -303,7 +352,7 @@ _STOPWORDS = {
 
 
 # Every number is a fact to protect in a rewrite — not just suffixed metrics
-# (40%, 10K+) but bare ones too: "219-test suite", "6-node pipeline",
+# (25%, 20K+) but bare ones too: "219-test suite", "6-node pipeline",
 # "4 engineers", "3-month engagement". _METRIC_RE (suffixed only) stays as the
 # invented-metric detector's definition; this broader one is for fidelity.
 _NUMBER_RE = re.compile(r'\d+(?:\.\d+)?[\+%KkxX]?')
@@ -320,7 +369,13 @@ def _content_tokens(text: str) -> set:
     return words | _numbers(text)
 
 
-def enforce_bullet_traceability(rewritten: list, source_selection: list, min_overlap: float = 0.40) -> tuple:
+def _stem_tokens(tokens: set) -> set:
+    """Fold simple plurals ("releases" ~ "release") so a rewrite isn't charged for them."""
+    return {t[:-1] if len(t) > 4 and t.endswith("s") and not t.endswith("ss") else t for t in tokens}
+
+
+def enforce_bullet_traceability(rewritten: list, source_selection: list, min_overlap: float = 0.40,
+                                max_new_share: float = 0.50, allowed_terms=None) -> tuple:
     """
     Deterministic floor on rewrite quality (Sep 2026). A real run produced
     experience bullets like "Defined technical requirements and led
@@ -336,10 +391,20 @@ def enforce_bullet_traceability(rewritten: list, source_selection: list, min_ove
     the same text the base resume uses, which reads fine. Tailoring is a
     bonus; fidelity is the floor.
 
+    Oct 2026, the other direction: a rewrite can keep the source's words AND add
+    new claims. A real run turned "Moved releases from manual steps to GitLab
+    CI and Jenkins pipelines" into "...reducing manual deployment steps and
+    standardizing build, test, and release stages across the team" — the second
+    half isn't in the source. So a rewrite whose content words are MORE than
+    `max_new_share` new (not in the source, not a verified JD keyword, not the
+    employer's own tech) is reverted too. `allowed_terms`: extra words that may
+    be added freely (verified keywords, employer tech).
+
     rewritten:        [{"company_name", "rewritten_text"}, ...]
     source_selection: [{"company_name", "original_text" | "text"}, ...]
     Returns (new_list, reverts) — reverts is a list of (company, reason).
     """
+    allowed = _stem_tokens({w for term in (allowed_terms or []) for w in _content_tokens(str(term))})
     by_company: dict = {}
     for s in source_selection or []:
         text = s.get("original_text") or s.get("text") or ""
@@ -378,16 +443,57 @@ def enforce_bullet_traceability(rewritten: list, source_selection: list, min_ove
         src_metrics = _numbers(best_src)
         new_metrics = _numbers(new_text)
         reason = None
+        new_content = _stem_tokens(_content_tokens(new_text))
+        added = new_content - _stem_tokens(_content_tokens(best_src)) - allowed
+        new_share = len(added) / max(1, len(new_content))
         if best_overlap < min_overlap:
             reason = f"kept only {best_overlap:.0%} of the source's content"
         elif src_metrics - new_metrics:
             reason = f"dropped the source's number(s) {sorted(src_metrics - new_metrics)}"
+        elif new_share > max_new_share:
+            reason = f"added too much that isn't in the source ({new_share:.0%} new: {', '.join(sorted(added)[:6])})"
         if reason:
             reverts.append((b.get("company_name"), reason))
             result.append({**b, "rewritten_text": best_src})
         else:
             result.append(b)
     return result, reverts
+
+
+def fix_degree_status(summary: str, master_data: dict) -> str:
+    """'Pursuing an M.S.' -> 'Completed an M.S.' when the degree is completed (Oct 2026 bug)."""
+    edus = master_data.get("education") or []
+    if not edus or education_status_label(edus[0]) != "Completed":
+        return summary
+    return re.sub(r"\b(?:[Cc]urrently\s+)?([Pp])ursuing\b",
+                  lambda m: "Completed" if m.group(1) == "P" else "completed", summary)
+
+
+def summary_metric_backstop(summary: str, master_data: dict) -> str:
+    """
+    If the summary has no real metric (any number found in ANY master-data
+    experience bullet, after removing the "N years" figure), insert the base
+    summary's first metric-bearing sentence after the summary's first sentence —
+    unless a near-copy of it is already there (Oct 2026: a run printed the same
+    opening sentence twice because the check only looked at the bullets selected
+    for that JD).
+    """
+    sans_years = re.sub(r'\d+\+?\s*(?:years?|yrs?)\b', '', summary, flags=re.IGNORECASE)
+    in_summary = {m.lower() for m in _METRIC_RE.findall(sans_years)}
+    real = {m.lower() for e in master_data.get("experience", []) for b in e.get("bullets", [])
+            for m in _METRIC_RE.findall(b.get("text") or "")}
+    if in_summary & real:
+        return summary
+    base_sentences = re.split(r'(?<=[.!?])\s+', (master_data.get("summary") or "").strip())
+    anchor = next((x for x in base_sentences if _METRIC_RE.findall(x)), None)
+    if not anchor:
+        return summary
+    parts = re.split(r'(?<=[.!?])\s+', summary.strip())
+    anchor_tokens = _content_tokens(anchor)
+    if any(len(anchor_tokens & _content_tokens(x)) / max(1, len(anchor_tokens)) >= 0.6 for x in parts):
+        return summary
+    parts.insert(1, anchor)
+    return " ".join(x.strip() for x in parts if x.strip())
 
 
 _FILLER_TAIL_RE = re.compile(
@@ -407,7 +513,7 @@ def strip_filler_tail(text: str) -> str:
     already states the outcome; the tail adds no fact and is one of the most
     recognizable generated-resume patterns. Only fires on a sentence-final
     clause opened by one of the listed verbs, so a real clause like
-    ", reducing setup time by 35%." is untouched.
+    ", reducing setup time by 30%." is untouched.
     """
     if not text:
         return text
@@ -555,9 +661,8 @@ def validate_writer_output(writer_output: dict, master_data: dict) -> dict:
                 issues.append(f"metric not in master data: '{m}'")
 
         # 2. Banned phrases
-        for phrase in BANNED_PHRASES:
-            if phrase in lower:
-                issues.append(f"banned phrase: '{phrase}'")
+        for phrase in banned_phrase_hits(text):
+            issues.append(f"banned phrase: '{phrase}'")
 
         # 3. Weak opening verb
         for verb in WEAK_VERBS:
@@ -593,9 +698,8 @@ def validate_writer_output(writer_output: dict, master_data: dict) -> dict:
             for m in _METRIC_RE.findall(text):
                 if m.lower() not in known_metrics:
                     issues.append(f"metric not in master data: '{m}'")
-            for phrase in BANNED_PHRASES:
-                if phrase in lower:
-                    issues.append(f"banned phrase: '{phrase}'")
+            for phrase in banned_phrase_hits(text):
+                issues.append(f"banned phrase: '{phrase}'")
 
             if issues:
                 flagged.append({
@@ -606,10 +710,33 @@ def validate_writer_output(writer_output: dict, master_data: dict) -> dict:
             else:
                 passed += 1
 
+    # Cadence: too many experience bullets ending in a ", <verb>ing ..." clause is
+    # the biggest generated-resume tell. The first `allowance` are fine; flag the
+    # surplus so the editor rewrites exactly those. The master-data source text is
+    # already clean of this pattern, so a healthy run flags nothing here.
+    _exp_texts = [(b.get("company_name", ""), b.get("rewritten_text", ""))
+                  for b in writer_output.get("tailored_bullets", [])]
+    _tail_positions = [i for i, (_, t) in enumerate(_exp_texts) if ends_in_participle_clause(t)]
+    for i in _tail_positions[participle_allowance(len(_exp_texts)):]:
+        company, text = _exp_texts[i]
+        msg = ("ends in a participial clause (', reducing...', ', ensuring...'); too many bullets share "
+               "this cadence: restructure this one so the result is a plain clause or its own sentence")
+        already = next((f for f in flagged if f["bullet_text"] == text), None)
+        if already:
+            already["issues"].append(msg)
+        else:
+            flagged.append({"bullet_text": text, "company": company, "issues": [msg]})
+            passed -= 1  # it was counted as passed above
+
     # Summary checks
     summary = writer_output.get("tailored_summary", "")
     summary_lower = summary.lower()
     summary_issues = []
+    for phrase in banned_phrase_hits(summary):
+        summary_issues.append(f"banned phrase in summary: '{phrase}'")
+    _edus = master_data.get("education") or []
+    if _edus and education_status_label(_edus[0]) == "Completed" and re.search(r"\b(pursuing|completing)\b", summary_lower):
+        summary_issues.append("summary describes the degree as in progress, but it is completed")
     # NOTE: no OPT/availability requirement here by design — removed at the
     # user's explicit request. The header contact line already dropped this
     # earlier in this project's history, and now the summary no longer
@@ -619,7 +746,7 @@ def validate_writer_output(writer_output: dict, master_data: dict) -> dict:
     # The summary brief (writer_node's RESUME INSTRUCTIONS) requires at least
     # one real, verifiable number from the candidate's experience bullets. The
     # writer has been observed dropping this entirely — a summary with zero
-    # evidence even though real metrics (10K+ users, 40%, 35%, 30+ endpoints)
+    # evidence even though real metrics (20K+ users, 25%, 30%, 30+ endpoints)
     # are printed in the same resume's bullets. Summary-level counterpart to
     # detect_dropped_metrics() for bullets.
     #
@@ -635,7 +762,7 @@ def validate_writer_output(writer_output: dict, master_data: dict) -> dict:
         summary_issues.append(
             "summary contains no real, verifiable number from the candidate's experience bullets "
             "(beyond the years-of-experience figure) — it must cite at least one real metric such as "
-            "10K+ users or 35% faster setup, drawn from the selected bullets, not a generic description"
+            "20K+ users or 30% faster setup, drawn from the selected bullets, not a generic description"
         )
     # Resume voice is implied first person. "I led..." / "my work..." reads as
     # a cover letter pasted into a resume, and the summary brief forbids it;
@@ -785,15 +912,15 @@ def validate_cross_document_consistency(draft_data: dict, master_data: dict) -> 
         # Check for known wrong variants in summary and bullet text
         wrong_variants = []
         # Flag only definitively wrong single-word or truncated uses
-        if company == "Tata Consultancy Services":
-            for wrong in ["System Engineer", "Systems Engineer", "Software Engineer at TCS",
-                          "System Engineering"]:
+        corr = next((c for c in title_corrections(master_data) if c["company"] == company), None)
+        if corr:
+            for wrong in corr.get("wrong_titles_summary", []):
                 if wrong.lower() in summary_text.lower():
                     wrong_variants.append(wrong)
             for b in draft_data.get("tailored_bullets", []):
                 if b.get("company_name") == company:
                     bt = b.get("rewritten_text", "")
-                    for wrong in ["System Engineer", "Systems Engineer"]:
+                    for wrong in corr.get("wrong_titles_bullets", []):
                         if wrong.lower() in bt.lower():
                             wrong_variants.append(f"bullet: '{wrong}'")
         if wrong_variants:
@@ -983,7 +1110,7 @@ def strategist_node(state: ResumeGraphState):
     jd_keywords = state.get("verified_keywords") or state.get("jd_keywords", [])
 
     # Employers marked include_in_generic: false (thin, low-signal roles —
-    # currently just the Virginia Tech Grader position) are excluded from the
+    # currently just a short part-time grader position) are excluded from the
     # BASE resume by generate_generic.py; the tailored pipeline never checked
     # this and could surface them anyway (real bug, found Sep 2026: the role
     # appeared on a real tailored resume with a bullet the strategist never
@@ -1112,6 +1239,30 @@ def strategist_node(state: ResumeGraphState):
                 selection.selected_bullets.remove(b)
             _selected_by_company[company] = kept
             print(f"  [strategist] Trimmed {company}: -{excess} bullet(s) (lowest relevance_score) to reach {max_b}")
+
+    # Anchor bullets (Oct 2026): each employer's base_priority-1 bullet is the one
+    # a reader must see (for the main employer: the 20K+-user app). A real run dropped it
+    # for a debugging bullet because the role was "Java backend". Swap it back
+    # in for the lowest-relevance pick, keeping the count unchanged.
+    def _is_anchor(b: dict) -> bool:
+        p = b.get("base_priority")
+        return (min(p.values()) if isinstance(p, dict) and p else p) == 1
+    for exp in tailored_experience:
+        company = exp["company"]
+        current = _selected_by_company.get(company, [])
+        chosen = {b.original_text for b in current}
+        for anchor in [b for b in exp["bullets"] if _is_anchor(b) and b["text"] not in chosen]:
+            if not current:
+                break
+            weakest = min(current, key=lambda b: b.relevance_score)
+            selection.selected_bullets.remove(weakest)
+            current.remove(weakest)
+            new_bullet = SelectedBullet(company_name=company, original_text=anchor["text"], relevance_score=5,
+                                        selection_reason="Anchor bullet: always shown for this employer.")
+            selection.selected_bullets.append(new_bullet)
+            current.append(new_bullet)
+            print(f"  [strategist] {company}: kept the anchor bullet (replaced the lowest-relevance pick)")
+        _selected_by_company[company] = current
 
     # Fuzzy-validate returned project names against actual names to prevent
     # silent data loss if the LLM abbreviates or paraphrases.
@@ -1253,6 +1404,16 @@ def writer_node(state: ResumeGraphState):
 
     # Exact title map passed verbatim into the prompt — LLM must not deviate from these.
     title_map_for_prompt = {e["company"]: e["title"] for e in master_data["experience"]}
+    title_example_lines = ""
+    _corr = title_corrections(master_data)
+    if _corr:
+        _c = _corr[0]
+        _wrong = (_c.get("auto_replace") or _c.get("wrong_titles_summary") or [""])[0]
+        if _wrong:
+            title_example_lines = (
+                f'\n       ❌ "{_wrong} at {_c["company"]}"'
+                f'\n       ✅ "{title_map_for_prompt.get(_c["company"], "")} at {_c["company"]}"'
+            )
 
     # Project tech stacks — only for selected projects (not all 7).
     _selected_project_names = {p["name"] for p in selected_projects_data}
@@ -1283,15 +1444,16 @@ def writer_node(state: ResumeGraphState):
        [METRIC NEEDED] at the end of that bullet.
 
     2. Never add a technology to a bullet that is not already associated with that
-       employer or project in master data. Do not add React to a TCS bullet because
-       the JD mentions React. Only use technologies tagged to that specific entry.
+       employer or project in master data. Do not add React to a bullet for an employer whose
+       entry does not list it, just because the JD mentions React. Only use technologies tagged to that specific entry.
        For project bullets, ONLY mention technologies present in that project's tech_stack.
        PROJECT TECH STACKS (source of truth): {json.dumps(project_tech_map)}
 
     3. Never use these phrases under any circumstances:
        spearheaded, leveraged, synergized, passionate about, results-driven,
        detail-oriented, thought leader, dynamic, robust, cutting-edge,
-       game-changing, best-in-class, world-class
+       game-changing, best-in-class, world-class, seamless, comprehensive,
+       end-to-end ("dynamic programming", the algorithms topic, is fine)
 
     4. Never use weak verbs as the opening word of a bullet:
        helped, assisted, worked on, was responsible for, participated in,
@@ -1307,7 +1469,7 @@ def writer_node(state: ResumeGraphState):
        if appropriate — never in the resume itself.
 
     7. SHORT-TENURE CONTEXT — do not compress this away: if a selected bullet's source
-       text explains WHY a short-duration role was short (e.g. "a paid, project-based
+       text explains WHY a short-duration role was short (e.g. "a project-based
        fellowship", "a 3-month engagement"), that context clause must survive the
        rewrite. A bare 1-2 month role with no explanation reads as an unexplained abrupt
        stint to a recruiter; the framing clause is there specifically to answer that
@@ -1327,22 +1489,20 @@ def writer_node(state: ResumeGraphState):
        The following are the EXACT canonical titles from the candidate's record.
        Use these titles exactly if you reference a role in the summary or cover letter.
        Do NOT abbreviate, infer, or substitute a different title.
-       CANONICAL TITLE MAP: {json.dumps(title_map_for_prompt)}
-       ❌ "Systems Engineer at Tata Consultancy Services"
-       ✅ "System Engineer at Tata Consultancy Services"
+       CANONICAL TITLE MAP: {json.dumps(title_map_for_prompt)}{title_example_lines}
 
     10. SUMMARY EXPERIENCE FRAMING — non-negotiable:
        When writing "X years of experience with [technology stack]", the technology
        named MUST be present in the employer experience entries, not just projects.
-       The candidate's 4+ year production stack is: Angular, Spring Boot, Java, Ionic,
-       TypeScript, GitLab CI, JWT. React, Node.js, Flask, MongoDB, PyTorch, and similar
-       appear ONLY in project work.
+       The candidate's production stack (nearly 4 years at TCS) is: Angular, Ionic, TypeScript,
+       Spring Boot, Java, MongoDB, JWT, GitLab CI, Jenkins. React, Node.js, Flask, PyTorch and
+       similar appear ONLY in project work.
        - If tailoring toward a React/Node JD, write:
-         "4+ years of production experience building enterprise applications with Java/Spring
+         "nearly 4 years of production experience building enterprise applications with Java/Spring
          Boot and Angular, with hands-on React and Node.js experience from personal projects."
-       - NEVER write: "4+ years of React/Node experience" or "Full-stack JavaScript engineer
-         with 4+ years of enterprise experience" — these are false and inconsistent with the
-         experience bullets.
+       - NEVER write: "nearly 4 years of React/Node experience" or "Full-stack JavaScript engineer
+         with 4+ years of enterprise experience": these are false and inconsistent with the
+         experience bullets. The total is never "4+ years".
        The summary and experience bullets must describe the SAME candidate.
 
     JOB DESCRIPTION: {jd[:2500]}
@@ -1362,7 +1522,8 @@ def writer_node(state: ResumeGraphState):
 
     RESUME INSTRUCTIONS:
 
-    — SUMMARY (2-3 sentences, 80 words maximum — a brief, not a template):
+    — SUMMARY (2-3 sentences, 55 words maximum — it must fit in three lines, like the base
+      resume's summary; a brief, not a template):
     Write it the way a person describes themselves, not the way a job posting describes a role —
     but in standard resume voice: IMPLIED first person, never "I", "my", or "me" (write "Led
     frontend delivery…", not "I led…"). Every tailored resume must NOT share one identical
@@ -1377,14 +1538,21 @@ def writer_node(state: ResumeGraphState):
     - States total production experience as "{primary_exp['approx_years']} years" — never
       inflate it, and never pin all of it to one employer.
     - Contains one to three REAL numbers, every one of them drawn from the SELECTED experience
-      bullets for {primary_exp['company']} (e.g. 10K+ users, 35%). A summary with no real number
+      bullets for {primary_exp['company']} (e.g. 20K+ users, 30+ APIs). A summary with no real number
       is a failure; a summary with a number that isn't in those bullets is a worse one.
-    - Names the degree and school naturally — "an M.S. in Computer Engineering at Virginia Tech",
+    - Names the degree and school naturally — "an M.S. in Computer Science at Example University",
       not the raw strings pasted together. Degree: {primary_edu['degree']}. School:
-      {primary_edu['university']} (omit the city). GPA {primary_edu['gpa']} may be included.
+      {primary_edu['university']} (omit the city). Do NOT include the GPA (it is in Education).
+      The degree is {edu_status}: when it is Completed, write "M.S. in ..." or "completed an
+      M.S. in ...", never "pursuing" or "completing".
+    - Unless the JD is AI/LLM-focused, the first sentence leads with the production work:
+      shipping the Angular/Ionic and Spring Boot app for a retail client (20K+ users).
+    - Wherever the LangGraph job-application agent is mentioned, call it a personal project.
+      Never describe the Handshake fellowship as "paid".
     - If the JD is AI/LLM-focused, the FIRST sentence says what the candidate has actually
-      built recently with LLMs (an agentic LangGraph pipeline with a test suite; red-teaming
-      models in a paid fellowship), framed honestly as recent/project work per rule 10.
+      built recently with LLMs (an agentic LangGraph pipeline with a test suite, built as a
+      personal project; red-teaming LLMs in a project-based AI fellowship), framed honestly as
+      recent/project work per rule 10.
       An AI role whose summary never mentions AI work is a failure.
     - The angle of the first sentence relates to the JD's primary requirement.
 
@@ -1399,9 +1567,9 @@ def writer_node(state: ResumeGraphState):
     - Use bullet points, pipes, em dashes, or generic filler phrases.
 
     — KEYWORD PLACEMENT STRATEGY (follow strictly):
-    TECHNICAL keywords (Angular, Python, Spring Boot, Docker, GitLab, RESTful APIs, microservices, etc.):
+    TECHNICAL keywords (React, Python, Flask, Docker, GitLab, REST APIs, etc.):
       → Embed in bullets as the TOOL or METHOD used — part of the action or context.
-      → Example: "Engineered Spring Boot microservices..." or "Automated CI/CD pipelines using GitLab..."
+      → Example: "Engineered Flask services..." or "Automated CI/CD pipelines using GitLab..."
     CONCEPTUAL keywords (System Reliability, Observability, Monitoring, Operations at scale,
     Software Development, Performance Optimization, Infrastructure, Design Documents):
       → These go ONLY in the professional summary — NEVER appended to bullet endings.
@@ -1429,10 +1597,10 @@ def writer_node(state: ResumeGraphState):
        "Spearheaded" stays banned (HONESTY CONSTRAINTS above).
     3. BULLET ENDING RULE: the last clause should land on a real, concrete outcome, not trail
        off into a keyword phrase. NEVER end with a bare keyword suffix.
-       ❌ "...supporting 10K+ users and enhancing Software Systems."
+       ❌ "...supporting 20K+ users and enhancing Software Systems."
        ❌ "...implementing JWT flows to enhance Software Development and System Reliability."
-       ✅ "...serving 10K+ active users in a regulated UK financial services environment."
-       ✅ "...reducing initial project setup time by 35% across all client engagements."
+       ✅ "...serving 20K+ active users in a production environment."
+       ✅ "...reducing initial project setup time by 30% across all client engagements."
        This does NOT mean every bullet must end in a number. A concrete non-numeric outcome
        (scope delivered, a system stabilized, ownership of a deliverable) is a valid ending
        when that is what the source bullet actually supports — do not force a number where
@@ -1525,7 +1693,9 @@ def writer_node(state: ResumeGraphState):
     # Deterministic fidelity floor: any rewrite that drifted from its source
     # (generic filler, dropped numbers, invented specifics) is reverted to the
     # source text. See enforce_bullet_traceability().
-    _tailored_bullets, _reverts = enforce_bullet_traceability(_tailored_bullets, selected_experience_trimmed)
+    _allowed_terms = list(jd_keywords or []) + [t for e in tailored_experience for t in (e.get("tech_stack") or [])]
+    _tailored_bullets, _reverts = enforce_bullet_traceability(
+        _tailored_bullets, selected_experience_trimmed, allowed_terms=_allowed_terms)
     for _company, _reason in _reverts:
         print(f"  [traceability] {_company}: reverted a rewritten bullet to its source — {_reason}")
     _tailored_projects, _preverts = enforce_project_bullet_traceability(
@@ -1652,6 +1822,21 @@ def editor_node(state: ResumeGraphState):
 
     # Pass the exact title map so the editor knows the canonical values.
     title_map = consistency_report["title_map"]
+    title_hint = (
+        "\n        Check: summary sentence 2, any cover letter paragraph naming a role, and every"
+        "\n        bullet's implied role framing."
+    )
+    _corr = title_corrections(master_data)
+    if _corr:
+        _c = _corr[0]
+        _wrong = (_c.get("wrong_titles_summary") or [""])[0]
+        _short = _c.get("short_name") or _c["company"]
+        title_hint = (
+            f'\n        The most common failure: writing "{_wrong}" for {_c["company"]}.'
+            f'\n        The correct title is "{title_map.get(_c["company"], _wrong)}".'
+            f'\n        Check: summary sentence 2, any cover letter paragraph referencing {_short}, and every'
+            f"\n        bullet's implied role framing."
+        )
 
     # Strip metadata-only fields from experience bullets — editor only needs
     # text and technologies_used to validate the draft.
@@ -1710,10 +1895,10 @@ def editor_node(state: ResumeGraphState):
     2. TAIL-KEYWORD STUFFING — HIGHEST PRIORITY CHECK: Scan every bullet for this exact
        anti-pattern: a real bullet ending followed by a comma/conjunction and then a JD keyword
        phrase as a suffix. Examples to catch and fix:
-       ❌ "...supporting 10K+ users and enhancing Software Systems."
+       ❌ "...supporting 20K+ users and enhancing Software Systems."
        ❌ "...authentication flows to enhance Software Development and System Reliability."
        ❌ "...reducing page load times, thereby improving Performance Optimization of Software Systems."
-       ❌ "...deployment cycles by 40% and improving System Reliability and Operations at scale."
+       ❌ "...deployment cycles by 25% and improving System Reliability and Operations at scale."
        If you find this pattern, DELETE the keyword suffix entirely. The bullet already ends
        with a strong outcome — the suffix adds nothing and screams AI-generated to recruiters.
     3. ATS COVERAGE: Verify each keyword appears at least once across the full resume.
@@ -1729,7 +1914,7 @@ def editor_node(state: ResumeGraphState):
        pattern to recruiters in 2026 and undermines the bullets that are genuinely true.
     5. SUMMARY CHECK: Verify the summary states years of experience, names the degree and school
        naturally (not raw strings pasted together, no city), and contains at least one real,
-       verifiable metric from the candidate's experience bullets (e.g. "10K+ users", "35% faster
+       verifiable metric from the candidate's experience bullets (e.g. "20K+ users", "30% faster
        setup"). If SUMMARY VALIDATION ISSUES above flags a missing metric, ADD a sentence that
        cites one from the candidate's selected bullets (shown in CANDIDATE TRUE MASTER DATA) —
        do not delete or shorten the summary to make the flag go away, and never invent a number.
@@ -1758,11 +1943,7 @@ def editor_node(state: ResumeGraphState):
     11. JOB TITLE ACCURACY — non-negotiable:
         Every role title in generated text (summary sentence 2, cover letter references)
         MUST match the canonical title below exactly. Do NOT abbreviate or substitute.
-        CANONICAL TITLES: {json.dumps(title_map)}
-        The most common failure: writing "System Engineer" for Tata Consultancy Services.
-        The correct title is "{title_map.get('Tata Consultancy Services', 'System Engineer')}".
-        Check: summary sentence 2, any cover letter paragraph referencing TCS, and every
-        bullet's implied role framing.
+        CANONICAL TITLES: {json.dumps(title_map)}{title_hint}
     12. TECH STACK CONSISTENCY IN PROJECT BULLETS — non-negotiable:
         For each project bullet, the programming languages and frameworks mentioned must
         match that project's listed tech stack. The AI Resume Agent project is Python-based
@@ -1771,8 +1952,8 @@ def editor_node(state: ResumeGraphState):
         Apply this cross-check to every project entry.
     13. SUMMARY EXPERIENCE FRAMING:
         The summary's "years of experience" claim must be consistent with the experience
-        section. Production stack (4+ years): Angular, Spring Boot, Java, Ionic, TypeScript.
-        React, Node.js, Flask, MongoDB are project-only. If the current summary overstates
+        section. Production stack (nearly 4 years): Angular, Ionic, TypeScript, Spring Boot, Java,
+        MongoDB. React, Node.js, Flask are project-only. Never "4+ years". If the current summary overstates
         React/Node as primary production skills, reframe it as shown in directive 9 above.
         The resume and summary must describe the same person.
 
@@ -1884,9 +2065,11 @@ def finalizer_node(state: ResumeGraphState):
     # Build this dynamically from master_data so it stays in sync when titles change.
     canonical_titles = {e["company"]: e["title"] for e in state["master_data"]["experience"]}
     # Known wrong variants the LLM tends to generate (add entries as new patterns emerge).
-    _title_corrections = {
-        "Systems Engineer": canonical_titles.get("Tata Consultancy Services", "System Engineer"),
-    }
+    # Wrong variants to auto-replace come from candidate_context.title_corrections (master data).
+    _title_corrections = {}
+    for _c in title_corrections(state["master_data"]):
+        for _wrong in _c.get("auto_replace", []):
+            _title_corrections[_wrong] = canonical_titles.get(_c["company"], _wrong)
 
     def _normalize_titles(text: str) -> str:
         for wrong, canonical in _title_corrections.items():
@@ -1895,6 +2078,12 @@ def finalizer_node(state: ResumeGraphState):
 
     raw_summary = state["final_resume_data"]["tailored_summary"]
     final_data["summary"] = _normalize_titles(raw_summary)
+    # Degree status is a fact, not a style choice (Oct 2026: a run wrote "Pursuing
+    # an M.S." for a degree completed in May 2026).
+    _fixed = fix_degree_status(final_data["summary"], state["master_data"])
+    if _fixed != final_data["summary"]:
+        print("  [finalizer] summary said the degree is in progress — corrected to completed")
+        final_data["summary"] = _fixed
 
     # Deterministic backstop for the summary's evidence (Sep 2026): on a real
     # run the writer produced a summary with no achievement metric at all, the
@@ -1906,21 +2095,10 @@ def finalizer_node(state: ResumeGraphState):
     # already verified, written in the candidate's voice) right after the
     # first sentence. A slightly redundant true sentence beats an evidence-free
     # summary, and this can never silently regress regardless of the LLM.
-    _summary_sans_years = re.sub(r'\d+\+?\s*(?:years?|yrs?)\b', '', final_data["summary"], flags=re.IGNORECASE)
-    _summary_metrics = {m.lower() for m in _METRIC_RE.findall(_summary_sans_years)}
-    _selected_metrics = {
-        m.lower()
-        for b in (state.get("selected_content") or {}).get("experience", [])
-        for m in _METRIC_RE.findall(b.get("original_text") or b.get("text") or "")
-    }
-    if not (_summary_metrics & _selected_metrics):
-        _base_sentences = re.split(r'(?<=[.!?])\s+', (state["master_data"].get("summary") or "").strip())
-        _anchor = next((s for s in _base_sentences if _METRIC_RE.findall(s)), None)
-        if _anchor:
-            _parts = re.split(r'(?<=[.!?])\s+', final_data["summary"].strip())
-            _parts.insert(1, _anchor)
-            final_data["summary"] = " ".join(p.strip() for p in _parts if p.strip())
-            print("  [finalizer] summary carried no real metric — inserted the base-resume achievement sentence")
+    _backstopped = summary_metric_backstop(final_data["summary"], state["master_data"])
+    if _backstopped != final_data["summary"]:
+        final_data["summary"] = _backstopped
+        print("  [finalizer] summary carried no real metric — inserted the base-resume achievement sentence")
     raw_cl = state["final_resume_data"]["cover_letter_paragraphs"] or []
     final_data["cover_letter_paragraphs"] = [_normalize_titles(p) for p in raw_cl]
     final_data["company_name"] = state.get("company_name", "Unknown Company")

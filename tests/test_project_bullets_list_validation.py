@@ -18,20 +18,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from graph import validate_writer_output
 
 _MASTER_DATA = {
-    "experience": [{"company": "TCS", "bullets": [{"text": "Served 10K+ users.", "tags": []}]}],
+    "experience": [{"company": "TCS", "bullets": [{"text": "Served 20K+ users.", "tags": []}]}],
     "projects": [
         {
             "name": "Zero-Knowledge Password Authentication",
             "bullets": [
                 {"text": "Built a secure authentication system using zero-knowledge proofs."},
-                {"text": "Developed a Node.js backend and React frontend with end-to-end tests."},
+                {"text": "Developed a Node.js backend and React frontend with integration tests."},
             ],
         }
     ],
     "personal_info": {},
 }
 
-_OK_SUMMARY = "Engineer who served 10K+ users over 4+ years."
+_OK_SUMMARY = "Engineer who served 20K+ users over 4+ years."
 
 
 def test_invented_metric_inside_bullets_list_is_flagged():
@@ -60,7 +60,7 @@ def test_metric_free_bullets_list_passes_cleanly():
             "project_name": "Zero-Knowledge Password Authentication",
             "bullets": [
                 "Designed a zero-knowledge authentication system with Circom circuits and Poseidon hashing.",
-                "Integrated a Node.js verification pipeline with a React frontend, with end-to-end cryptographic tests against phishing and replay attacks.",
+                "Integrated a Node.js verification pipeline with a React frontend, with cryptographic tests against phishing and replay attacks.",
             ],
         }],
     }

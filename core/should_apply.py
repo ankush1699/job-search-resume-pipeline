@@ -32,7 +32,8 @@ import os
 import time
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.llm import get_chat_model, cheap_provider, is_quota_exhausted, next_cheap_provider
@@ -83,7 +84,33 @@ RUBRIC_VERSION = 2
 
 # Only used if Ankush_Master_Data.json is missing/unreadable — should never
 # normally be hit, so it doesn't need to be kept in sync with real data.
-_CANDIDATE_STACK_FALLBACK = "Python, JavaScript, TypeScript, Java, SQL, Angular, Spring Boot, AWS, Docker"
+_CANDIDATE_STACK_FALLBACK = "Python, JavaScript, SQL, Docker"
+
+# Used when the master data has no `candidate_context.scoring_context` list.
+_CANDIDATE_CONTEXT_FALLBACK = (
+    "- No candidate context provided. Add a candidate_context.scoring_context list "
+    "to your master data file (see Ankush_Master_Data.example.json)."
+)
+
+
+def _load_candidate_context() -> str:
+    """
+    Builds the CANDIDATE CONTEXT block (experience, work authorization, target
+    level) from `candidate_context.scoring_context` in the master data file, one
+    bullet per list item. This used to be hardcoded in the prompt; it lives in the
+    gitignored master data so personal details never ship with the code.
+    Read fresh on every call, like _load_candidate_stack().
+    """
+    try:
+        with open(MASTER_DATA_PATH) as f:
+            master_data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return _CANDIDATE_CONTEXT_FALLBACK
+    lines = (master_data.get("candidate_context") or {}).get("scoring_context") or []
+    lines = [str(line).strip() for line in lines if str(line).strip()]
+    if not lines:
+        return _CANDIDATE_CONTEXT_FALLBACK
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def _load_candidate_stack() -> str:
@@ -379,11 +406,7 @@ CANDIDATE STACK (use this to count tech matches — do not invent skills):
 {_load_candidate_stack()}
 
 CANDIDATE CONTEXT:
-- 4 years total experience (all at one Indian IT company — TCS)
-- Just completed a US Master's degree — zero US work experience
-- F-1 OPT visa — needs H-1B sponsorship for long-term employment
-- Target: entry-level, junior, or mid-level SWE roles in the US
-- Strong in full-stack (Angular + Spring Boot + Python), growing in AI/LLM tooling
+{_load_candidate_context()}
 
 BASE RESUME CONTENT (what's actually printed on the candidate's current
 generic resume — a SEPARATE question from job fit above. Judge
@@ -429,8 +452,45 @@ _CORRECTION_TEMPLATE = (
 )
 
 
+_FORMAT_CORRECTION_TEMPLATE = (
+    "Your previous answer for this job description could not be used: {problem}. "
+    "Call the tool again with ALL 10 fields, each as its own separate field: tech_score, "
+    "seniority_score, role_type_score and sponsorship_bonus_score (integers), seniority_level "
+    "and role_type (short labels), reasoning (one sentence), jd_summary (three sentences), "
+    "tailoring_recommended (exactly true or false, nothing else) and tailoring_reasoning (one "
+    "sentence). Never merge two fields or put tags or other field names inside a value."
+)
+
+
+class ScoringFailed(RuntimeError):
+    """Scoring gave up. `paid_calls` = paid model calls already spent on it, so the
+    run funnel can report the real cost of failures too (Oct 2026: a run's display
+    showed 21c while the bill was 37c because failed attempts were never counted)."""
+
+    def __init__(self, message: str, paid_calls: int = 0):
+        super().__init__(message)
+        self.paid_calls = paid_calls
+
+
+def _format_problem(exc: Exception) -> str:
+    """Plain description of a malformed tool call, for the corrective re-ask."""
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors()[:4]:
+            field = ".".join(str(x) for x in err.get("loc", ())) or "a field"
+            kind = err.get("type", "")
+            if kind == "missing":
+                parts.append(f"the '{field}' field was missing")
+            elif kind.startswith("bool"):
+                parts.append(f"'{field}' must be exactly true or false")
+            else:
+                parts.append(f"'{field}' was invalid ({err.get('msg', 'bad value')})")
+        return "; ".join(parts) or "the tool call did not match the schema"
+    return f"the tool call could not be parsed ({str(exc)[:160]})"
+
+
 def _build_messages(provider: str, static_prompt: str, jd_prompt: str,
-                    correction: str | None = None) -> list:
+                    correction: str | None = None, correction_kind: str = "scores") -> list:
     """
     System (static, cacheable) + human (the JD) messages for one scoring
     call. The Anthropic cache_control marker is a content-block attribute,
@@ -450,7 +510,8 @@ def _build_messages(provider: str, static_prompt: str, jd_prompt: str,
         system_content = static_prompt
     messages = [SystemMessage(content=system_content), HumanMessage(content=jd_prompt)]
     if correction:
-        messages.append(HumanMessage(content=_CORRECTION_TEMPLATE.format(problem=correction)))
+        template = _FORMAT_CORRECTION_TEMPLATE if correction_kind == "format" else _CORRECTION_TEMPLATE
+        messages.append(HumanMessage(content=template.format(problem=correction)))
     return messages
 
 
@@ -488,17 +549,26 @@ def _llm_score(jd: str, max_retries: int = 3) -> dict:
     # three times, and the job ended up unscored.
     #   1. An inconsistent/out-of-range answer gets ONE corrective re-ask on
     #      the SAME provider first (the contradiction is fed back verbatim,
-    #      system prefix unchanged so the cache still hits, ~$0.003). On the
+    #      system prefix unchanged so the cache still hits, so the retry is cheap). On the
     #      primary provider that's a far better bet than hopping to a
     #      fallback that is unreliable by design.
     #   2. When a hop-worthy failure hits and the chain has nothing left,
     #      raise immediately, naming every provider's failure. Retrying a
     #      provider already judged a dead end just burns time and quota.
+    #
+    # Oct 2026, same idea for MALFORMED tool calls (pydantic ValidationError /
+    # OutputParserException): a missing field or a value with tags in it. At
+    # temperature 0 an identical retry reproduces the identical mistake — a real
+    # run burned 24 paid calls on 8 jobs that way and scored none of them — so a
+    # format error gets one re-ask that names the broken field, then counts as
+    # hop-worthy like the other dead ends. At most 2 paid calls per job.
     corrected: set = set()   # providers that already had their corrective re-ask
     failures: list = []      # "provider: error" per provider given up on
+    calls: dict = {}         # model calls per provider (only "anthropic" is paid)
     attempt = 0
     while attempt < max_retries:
         try:
+            calls[provider] = calls.get(provider, 0) + 1
             result = structured.invoke(messages)
             tech  = _coerce_subscore(result.tech_score, 45, "tech_score")
             sen   = _coerce_subscore(result.seniority_score, 25, "seniority_score")
@@ -517,16 +587,23 @@ def _llm_score(jd: str, max_retries: int = 3) -> dict:
                                "role_type": role, "sponsorship_bonus": spons},
                 "tailoring_recommended": bool(result.tailoring_recommended),
                 "tailoring_reasoning": result.tailoring_reasoning,
+                "paid_calls": calls.get("anthropic", 0),
             }
         except Exception as exc:
             last_exc = exc
             bad_scores = isinstance(exc, (_SubScoreOutOfRange, _SubScoreInconsistent))
+            bad_format = isinstance(exc, (ValidationError, OutputParserException))
             # Rule 1: one corrective re-ask on the same provider, with the
-            # contradiction spelled out. Free of attempt budget.
-            if bad_scores and provider not in corrected:
+            # contradiction (or the malformed field) spelled out.
+            if (bad_scores or bad_format) and provider not in corrected:
                 corrected.add(provider)
-                print(f"  [should_apply] {provider} returned inconsistent scores ({exc}) — re-asking once with the contradiction pointed out")
-                messages = _build_messages(provider, static_prompt, jd_prompt, correction=str(exc))
+                if bad_format:
+                    problem = _format_problem(exc)
+                    print(f"  [should_apply] {provider} returned a malformed answer ({problem}) — re-asking once")
+                    messages = _build_messages(provider, static_prompt, jd_prompt, correction=problem, correction_kind="format")
+                else:
+                    print(f"  [should_apply] {provider} returned inconsistent scores ({exc}) — re-asking once with the contradiction pointed out")
+                    messages = _build_messages(provider, static_prompt, jd_prompt, correction=str(exc))
                 continue
             # A hard quota exhaustion (e.g. Groq's daily token cap) or a
             # model that can't emit a valid tool call won't clear in seconds
@@ -534,8 +611,9 @@ def _llm_score(jd: str, max_retries: int = 3) -> dict:
             # one in the chain instead of waiting/retrying. A second
             # inconsistent answer after the corrective re-ask is treated the
             # same way: that model isn't respecting the rubric for this JD.
-            if is_quota_exhausted(exc) or bad_scores:
-                reason = "quota exhausted / unusable tool calls" if is_quota_exhausted(exc) else "inconsistent scores"
+            if is_quota_exhausted(exc) or bad_scores or bad_format:
+                reason = ("quota exhausted / unusable tool calls" if is_quota_exhausted(exc)
+                          else "malformed answers" if bad_format else "inconsistent scores")
                 failures.append(f"{provider}: {reason} — {exc}")
                 fallback = next_cheap_provider(provider)
                 if fallback:
@@ -556,7 +634,7 @@ def _llm_score(jd: str, max_retries: int = 3) -> dict:
                 print(f"  [should_apply] Attempt {attempt} failed ({type(exc).__name__}). Retrying in {wait}s...")
                 time.sleep(wait)
     detail = "; ".join(failures) if failures else str(last_exc)
-    raise RuntimeError(f"should_apply LLM scoring failed ({detail})")
+    raise ScoringFailed(f"should_apply LLM scoring failed ({detail})", paid_calls=calls.get("anthropic", 0))
 
 
 # External sponsorship signal (scraper/sponsorship.py's SerpApi H-1B lookup)
@@ -665,5 +743,6 @@ def evaluate(jd: str, company: str = "", title: str = "", use_cache: bool = True
         "red_flags": [],
     }
     if use_cache:
-        jd_cache.update_entry(jd, company=company, title=title, should_apply=verdict)
+        cached = {k: v for k, v in verdict.items() if k != "paid_calls"}   # a per-run fact, not part of the verdict
+        jd_cache.update_entry(jd, company=company, title=title, should_apply=cached)
     return verdict

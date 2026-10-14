@@ -26,7 +26,7 @@ _SRC = [
         "eliminating manual data entry for program staff."},
     {"company_name": "TCS", "original_text":
         "Automated CI/CD pipelines using GitLab CI and Jenkins across development and staging environments, "
-        "accelerating deployment cycles by 40% and eliminating manual release steps."},
+        "accelerating deployment cycles by 25% and eliminating manual release steps."},
 ]
 
 
@@ -53,8 +53,8 @@ def test_dropping_the_sources_number_is_reverted():
         "Automated CI/CD pipelines using GitLab CI and Jenkins across development and staging "
         "environments, eliminating manual release steps and improving release consistency."}]
     out, reverts = enforce_bullet_traceability(rewritten, _SRC)
-    assert len(reverts) == 1 and "40%" in reverts[0][1]
-    assert "40%" in out[0]["rewritten_text"]
+    assert len(reverts) == 1 and "25%" in reverts[0][1]
+    assert "25%" in out[0]["rewritten_text"]
 
 
 def test_each_source_is_matched_at_most_once():

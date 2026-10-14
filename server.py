@@ -208,12 +208,17 @@ def _generate_entry(entry_id: str, generate_cover_letter: bool):
         files = []
         if output_folder and os.path.isdir(output_folder):
             files = sorted(f for f in os.listdir(output_folder) if f.lower().endswith(".pdf"))
+        report = result.get("usage") or {}
         entry.update({
             "apply_status": "completed",
             "pipeline_status": result.get("pipeline_status", ""),
             "output_folder": output_folder,
             "files": files,
             "apply_finished_at": _now(),
+            # measured cost of this generation (core/usage.py), shown in the Applications tab
+            "usage": {"cost_usd": report.get("cost_usd"), "calls": report.get("calls"),
+                      "input_tokens": report.get("input_tokens"), "output_tokens": report.get("output_tokens"),
+                      "cache_read_tokens": report.get("cache_read_tokens")} if report else None,
         })
         # The graph re-runs its own should_apply gate internally (cache-hit,
         # so free) regardless of what the UI already showed — if that gate
